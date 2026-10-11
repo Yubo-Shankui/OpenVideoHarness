@@ -9,12 +9,57 @@ import path from "node:path";
 
 export class BrowserGone extends Error {}
 
+// Chrome's profile folder goes when the browser is closed, and also when node ends some other way: process.exit (a
+// tool's own Ctrl-C handler, as bin/vh render has), or Ctrl-C, SIGTERM or SIGHUP with no handler of the tool's own
+// (bin/vh frames, textcheck, determinism, cues, and readcheck's texts step), where Node would otherwise die without
+// cleaning up. A tool that
+// handles the signal itself keeps it: this one only steps in when it is the only listener, and then re-sends the
+// signal so the process still ends the way it would have.
+const LIVE = new Set();   // { proc, profile } of every browser not closed yet
+const removeSync = (dir) => { try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* left in the temp folder */ } };
+// Chrome runs in a process group of its own, so its helpers (GPU, renderers) go with it: left alive, they write to the
+// profile again after it was removed. A short pause lets them go before the folder does
+const killGroup = (proc) => {
+  if (proc.exitCode !== null || proc.signalCode !== null) return;   // gone already: its group id may belong to another now
+  try { process.kill(-proc.pid, "SIGKILL"); } catch { try { proc.kill("SIGKILL"); } catch { /* gone */ } }
+};
+const cleanUp = () => {
+  if (!LIVE.size) return;
+  for (const b of LIVE) killGroup(b.proc);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+  for (const b of LIVE) removeSync(b.profile);
+  LIVE.clear();
+};
+// A JS signal listener defers the signal to the event loop (Node's own handling ends the process at once), so these
+// listeners live only while a browser does: after the last close, a Ctrl-C during synchronous work (determinism's
+// comparisons) still ends the process at once. process.on, not once: a signal the tool handles itself uses nothing up
+const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
+const onSignal = (sig) => {
+  if (process.listenerCount(sig) > 1) return;            // the tool has its own handler: it ends the process, "exit" cleans up
+  disarm(); cleanUp(); process.kill(process.pid, sig);   // no listener left, so the signal does what it does by default
+};
+const handlers = new Map(SIGNALS.map((sig) => [sig, () => onSignal(sig)]));
+let armed = false, exitHooked = false;
+function arm() {
+  if (!exitHooked) { exitHooked = true; process.on("exit", cleanUp); }
+  if (armed) return;
+  armed = true;
+  for (const [sig, h] of handlers) process.on(sig, h);
+}
+function disarm() {
+  if (!armed) return;
+  armed = false;
+  for (const [sig, h] of handlers) process.removeListener(sig, h);
+}
+
 // launch(exe, flags) → { send(method, params, sessionId), once(event, sessionId), close(), version }
 export async function launch(exe, flags = []) {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), "vh-textcheck-"));
   const args = ["--headless", "--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", `--user-data-dir=${profile}`,
     "--hide-scrollbars", "--mute-audio", "--force-color-profile=srgb", ...flags, "about:blank"];
-  const proc = spawn(exe, args, { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"] });
+  const proc = spawn(exe, args, { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"], detached: true });   // its own group: see killGroup
+  const live = { proc, profile };
+  LIVE.add(live); arm();
   let stderr = "";
   proc.stderr.on("data", (d) => { stderr = (stderr + d).slice(-4000); });
   const out = proc.stdio[3], inp = proc.stdio[4];
@@ -67,7 +112,10 @@ export async function launch(exe, flags = []) {
   };
   // the profile folder: Chrome's helper processes can still be writing to it just after the main one exits (Linux),
   // so retry, and never let a leftover temp folder turn into an error
-  const removeProfile = () => { try { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* left in the temp folder */ } };
+  // the last browser gone: the signal listeners go too. A Ctrl-C queued at the very instant Chrome's exit is handled is
+  // dropped with them (nothing is left behind, a second one ends the process); deferring this would bring back the
+  // Ctrl-C that synchronous work after the close could not stop
+  const removeProfile = () => { LIVE.delete(live); if (!LIVE.size) disarm(); removeSync(profile); };
   const close = async () => {
     if (!dead) try { await within(send("Browser.close"), 3000); } catch { /* already gone */ }
     proc.kill(); await exited;
@@ -75,9 +123,10 @@ export async function launch(exe, flags = []) {
   };
   let version;
   try {
-    version = await within(send("Browser.getVersion"), 30000, () => new Error("the browser did not answer within 30 s"));
+    // 60 s: a cold start on a busy CI runner has taken over 30 (a rerun of the same code passed)
+    version = await within(send("Browser.getVersion"), 60000, () => new Error("the browser did not answer within 60 s"));
     started = true;
-  } catch (e) { proc.kill(); await within(exited, 3000); removeProfile(); throw e; }
+  } catch (e) { killGroup(proc); await within(exited, 3000); removeProfile(); throw e; }   // a Chrome that never answered may ignore SIGTERM
   return { send, once, on, close, version: version.product };
 }
 
