@@ -33,7 +33,8 @@ window.film = {
 | `texts` | 数组，或 `ready` 之后调用、返回数组的函数：`[{text, start, end, read?}]`，同 readcheck 的 `texts.json` | `bin/vh textcheck`、`bin/vh readcheck` |
 | `events` | 画面事件：`[{t, kind, x?}]`，时刻、事件的种类（贴纸落下、盖章、翻页这类）、在画面上的横坐标（给声像用）。配什么声是另一步：`bin/vh sfx place` 读的 `events.json` 里写的是声音的名字 | 配音效、`bin/vh qa` 的 cue check（以后） |
 | `chapters` | `[{t, title}]` | 进度条、发布文案的章节表（以后） |
-| `cues` | 时间挂在旁白字词上时，每个挂点的解析结果：`[{id, ref, t}]` | 列出和查错（以后） |
+| `cues` | 时间挂在旁白字词上时，每个挂点的解析结果：`[{id, ref, t}]` | `bin/vh cues`：列出来；`--save` 存下，换了配音以后再跑，说出哪些挪了 |
+| `timeline` | 这些 cue 挂在哪份旁白时间轴上：相对页面的路径（`audio/timeline.zh.json`），没有旁白时是 `null` | `bin/vh cues` 记下它的 sha256，认出换过的配音 |
 
 这几项都是数据，在 `ready` 里算好：OpenFilm 的说法是"跟着声音走的时间是数据，不是接口"。
 
@@ -43,7 +44,7 @@ window.film = {
 
 ## 宿主做什么
 
-本仓库的宿主是 `tools/film/host.mjs`，`bin/vh frames`（取帧）、`bin/vh render`（出片）、`bin/vh determinism`（查硬规则 1）都用它：
+本仓库的宿主是 `tools/film/host.mjs`，`bin/vh frames`（取帧）、`bin/vh render`（出片）、`bin/vh determinism`（查硬规则 1）、`bin/vh cues`（列 cue）都用它，`bin/vh readcheck` 读 canvas-film 项目的字时也用它：
 
 1. 从页面所在的文件夹起一个只在本机 `127.0.0.1` 的服务来打开页面（不用 `file://`），所以页面能 `fetch` 这个文件夹里的文件；项目根目录的页面，就是整个项目。时区固定为 UTC，所以显示本地时间的页面在哪台机器上都画得一样。
 2. 页面的脚本运行之前，先设好 `window.filmHost = { version: '0.1', name: 'ovh' }`。看到它，页面就不能自己往前走：不开自转的动画循环，不自动播放，不开开发界面。

@@ -118,6 +118,7 @@ const CHAPTERS = [{ at: 0, title: "挂在字上" }, { at: "@b1", title: "翻一�
 | `events` | `[{t, kind, shot, x?, dur?}]` |
 | `chapters` | `[{t, title}]` |
 | `cues` | 每个 cue 的解析结果：`[{id, ref, t}]`，`id` 像 `S02.o.one`、`chapter2.at` |
+| `timeline` | 载入的旁白时间轴，相对 `film.html` 的路径；无声片是 `null` |
 
 页面从不自己往前走，只在 `frame(t)` 被调用时画；直接用浏览器打开 `film.html`（`file://`）读不到时间轴，什么也不画。
 
@@ -128,6 +129,7 @@ bin/vh frames <项目> --at 4.9,12.8           # 单帧，无损 PNG，在 <项�
 bin/vh frames <项目> --strip 12.2:13.4 --fps 10   # 一段的每一帧拼成一张，看转场和动作
 bin/vh frames <项目> --at 4.9 --dpr 2        # 4K 的帧
 bin/vh textcheck <项目>                       # reads 和字幕有没有被盖住、对比够不够、出没出画
+bin/vh cues <项目> --save                     # 每个 cue 落在第几秒，存进 out/cues.json；换了配音再跑，列出哪些镜头挪了、挪了多少
 bin/vh readcheck <项目>                       # reads 和字幕够不够时间读（读时底线）：先把 window.film.texts 写成 out/texts.json
 bin/vh determinism <项目>                     # 同几个时刻换顺序画、换进程画，看是不是 t 的纯函数
 bin/vh render <项目> [--dpr 2]                # 成片画面：<项目>/out/film.mp4（--dpr 2 是 4K），没有声音
@@ -144,7 +146,7 @@ bin/vh mux <项目>/out/film.mp4 <混音.wav> <成片.mp4>   # 套上混音
 ## 局限
 
 - 只有 16:9。别的画幅要同时改 `FILM.width`、`FILM.height` 和 `film.html` 里的尺寸，`bin/vh textcheck` 也还是按 1920 × 1080 打开页面。
-- SRT、镜头表（`shots.json`）、封面还没有导出。封面的取帧时间以后也写成 cue；现在可以先从 `window.film.cues` 里按镜头 id 查到时刻再取帧，不要把秒数写死。
+- SRT、镜头表（`shots.json`）、封面还没有导出。封面的取帧时间以后也写成 cue；现在可以先用 `bin/vh cues <项目>` 按镜头 id 查到时刻再取帧，不要把秒数写死。
 - 没有 Three.js 底层。
 - 字幕不按词切（见"字幕"）。
 - 录制器只看得到每镜 5 个时刻画到的东西：一个只在两个时刻之间才调用的 `cue()` 或 `read()` 会漏掉。把它们写在 `if` 外面，先登记，再判断这一帧要不要画。
