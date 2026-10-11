@@ -971,6 +971,59 @@ PY
   rm -rf "$t"
 }
 
+# bin/vh timeline (the narration timeline's checks) and bin/vh remap, and the refusal in bin/vh captions
+timeline_checks() {
+  local t a rc
+  t=$(mktemp -d "${TMPDIR:-/tmp}/vh-ci.XXXXXX")
+  a=$(vh timeline showcase/02-short-leo-doppler zh 2>&1); rc=$?
+  [ $rc = 0 ] && printf '%s' "$a" | grep -q "timeline: sound" && ok "timeline: showcase 02's narration is sound" || bad "timeline on showcase 02: exit $rc: $a"
+  mkdir -p "$t/p/audio"
+  python3 - "$t/p/audio/timeline.zh.json" <<'PY'
+import json, sys
+tl = json.load(open("showcase/02-short-leo-doppler/audio/timeline.zh.json", encoding="utf-8"))
+s = tl["segments"][1]; s["words"][2]["start"] = s["words"][1]["start"] - 0.5   # a word time out of order
+s = tl["segments"][3]; s["words"][0]["w"] = "宾果"                               # an aligner that spelled a word its own way
+json.dump(tl, open(sys.argv[1], "w", encoding="utf-8"), ensure_ascii=False)
+PY
+  a=$(vh timeline "$t/p" zh 2>&1); rc=$?
+  case "$rc:$a" in 1:*"out of order"*"the words read"*) ok "timeline: a word time out of order and a word spelled differently from the text are problems (exit 1)" ;;
+    *) bad "timeline on a broken timeline: exit $rc: $a" ;; esac
+  a=$(vh captions "$t/p" zh 2>&1); rc=$?
+  b=$(vh captions "$t/p" zh --skip-lint 2>&1); rc2=$?
+  c=$(vh captions "$t/p" zh --skip-lint --media-end 30 2>&1); rc3=$?
+  if [ $rc = 1 ] && printf '%s' "$a" | grep -q "timed wrong" && [ $rc2 = 0 ] && [ $rc3 = 0 ] && [ -s "$t/p/audio/captions.json" ]; then ok "captions: refuses a timeline that fails its checks, and goes on with --skip-lint (before or after --media-end)"
+  else bad "captions on a broken timeline: exit $rc ($a) / with --skip-lint exit $rc2 ($b) / --skip-lint --media-end exit $rc3 ($c)"; fi
+  python3 - "$t" <<'PY'
+import json, sys
+d = sys.argv[1]
+line = lambda i, t0, text, ws: {"id": i, "text": text, "start": t0, "end": round(t0 + sum(w[1] for w in ws), 3), "words": [
+    {"w": w, "start": round(t0 + sum(x[1] for x in ws[:k]), 3), "end": round(t0 + sum(x[1] for x in ws[:k + 1]), 3)} for k, (w, _) in enumerate(ws)]}
+for name, gap in (("old", 0.5), ("new", 1.5)):   # the new take has 1 s more before the second line
+    json.dump({"lang": "zh", "segments": [line("a", 0.0, "风吹过", [("风", 0.4), ("吹过", 1.1)]), line("b", 1.5 + gap, "纸飞走了", [("纸", 0.5), ("飞走了", 1.5)])]},
+              open(f"{d}/{name}.json", "w", encoding="utf-8"), ensure_ascii=False)
+json.dump([{"t": 0.2, "sfx": "wind"}, {"t": 2.6, "sfx": "paper", "gain_db": -6}, {"name": "x", "start": 1.8, "end": 4.5}], open(f"{d}/events.json", "w"))
+PY
+  a=$(vh remap "$t/events.json" --from "$t/old.json" --to "$t/new.json" 2>&1); rc=$?
+  if [ $rc = 0 ] && python3 -c "import json, sys; e = json.load(open(sys.argv[1])); sys.exit(0 if (e[0]['t'], e[1]['t'], e[1]['gain_db'], e[2]['start'], e[2]['end']) == (0.2, 3.6, -6, 2.4, 5.5) else 1)" "$t/events.json" && [ -s "$t/events.json.bak" ]
+  then ok "remap: seconds inside a line move with its words, in a gap in proportion, after the end with the last word; other numbers stay; the original kept as .bak"
+  else bad "remap: exit $rc: $a $(cat "$t/events.json" 2>/dev/null)"; fi
+  a=$(vh remap "$t/events.json" --from "$t/old.json" --to "$t/new.json" 2>&1); rc=$?
+  [ $rc = 2 ] && printf '%s' "$a" | grep -q "is there already" && ok "remap: refuses to overwrite an earlier remap's .bak" || bad "remap with a .bak there: exit $rc: $a"
+  python3 - "$t" <<'PY'
+import json, sys
+d = sys.argv[1]   # two lines that meet at 1.0 s; the new take puts 0.8 s between them
+L = lambda i, a, b, t: {"id": i, "text": t, "start": a, "end": b}
+json.dump({"segments": [L("a", 0, 1, "风"), L("b", 1, 2, "纸")]}, open(f"{d}/old2.json", "w"))
+json.dump({"segments": [L("a", 0, 1, "风"), L("b", 1.8, 2.8, "纸")]}, open(f"{d}/new2.json", "w"))
+json.dump([{"t": 0.9}, {"t": 1.1}, {"t": 1.6}], open(f"{d}/ev2.json", "w"))
+PY
+  a=$(vh remap "$t/ev2.json" --from "$t/old2.json" --to "$t/new2.json" --out "$t/ev2o.json" 2>&1); rc=$?
+  if [ $rc = 0 ] && python3 -c "import json, sys; sys.exit(0 if [e['t'] for e in json.load(open(sys.argv[1]))] == [0.9, 1.9, 2.4] else 1)" "$t/ev2o.json"
+  then ok "remap: where two lines met and a pause came between them, a time on the later line moves with it"
+  else bad "remap across a new pause: exit $rc: $a $(cat "$t/ev2o.json" 2>/dev/null)"; fi
+  rm -rf "$t"
+}
+
 # bin/vh pace on a synthetic take (22.05 kHz): tone-burst "syllables" with known onsets, lines at 4 to 7 a second, a long
 # pause inside a line and one the script asks for, gaps too short and too long, an ASR start placed 0.12 s late, one line's
 # end and the next one's start put at the same instant inside the first one's last syllable (an aligner did that), and a
@@ -1163,7 +1216,8 @@ PY
   case "$b" in *"transcribed before"*) ;; *) a="$a c --dry-run did not use the cache: $b" ;; esac
   vh pace "$t/c" >/dev/null 2>&1 && cmp -s "$t/c/audio/timeline.zh.raw.json" "$t/c.before/timeline.zh.json" || a="$a c: the .raw timeline is not the original"
   b=$(vh pace "$t/c2" 2>&1); [ $? = 1 ] && case "$b" in *"no word times"*) ;; *) false ;; esac || a="$a c2 (no words, no cache): $b"
-  b=$(vh pace "$t/o" 2>&1); [ $? = 1 ] && case "$b" in *"out of order"*) ;; *) false ;; esac || a="$a o (spans swapped): $b"
+  b=$(vh pace "$t/o" 2>&1); [ $? = 1 ] && case "$b" in *"the timeline has"*"out of order"*) ;; *) false ;; esac || a="$a o (spans swapped, the lint): $b"
+  b=$(vh pace "$t/o" --skip-lint 2>&1); [ $? = 1 ] && case "$b" in *"re-align the take"*) ;; *) false ;; esac || a="$a o (spans swapped, pace's own guard): $b"
   b=$(vh pace "$t/n" --dry-run 2>&1); case "$b" in *"no audio/script.txt"*) ;; *) a="$a n (no script.txt): $b" ;; esac
   b=$(PYTHONPATH="$t" uv run -q --no-project --with numpy python - "$t" 2>&1 <<'PY'
 import json, sys
@@ -1204,11 +1258,11 @@ PY
 }
 
 case "${1:-all}" in
-  --smoke) smoke_checks; pace_checks; decision_checks; desk_checks; textcheck_checks; film_checks ;;
+  --smoke) smoke_checks; pace_checks; timeline_checks; decision_checks; desk_checks; textcheck_checks; film_checks ;;
   --committed)   # exactly what a push would send: HEAD in a clean temporary checkout, uncommitted changes left out
     w="$(mktemp -d "${TMPDIR:-/tmp}/vh-ci.XXXXXX")/head"; git worktree add -q --detach "$w" HEAD || exit 2
     (cd "$w" && tools/ci.sh); rc=$?; git worktree remove --force "$w"; rmdir "$(dirname "$w")"; exit $rc ;;
-  all) static_checks; doc_checks; readpath_report; smoke_checks; pace_checks; decision_checks; desk_checks; textcheck_checks; film_checks ;;
+  all) static_checks; doc_checks; readpath_report; smoke_checks; pace_checks; timeline_checks; decision_checks; desk_checks; textcheck_checks; film_checks ;;
   *) echo "usage: tools/ci.sh [--smoke | --committed]"; exit 2 ;;
 esac
 [ $fails = 0 ] && ok "all checks passed" || printf '\033[31m%s check(s) failed\033[0m\n' "$fails"
