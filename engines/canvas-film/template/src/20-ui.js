@@ -53,14 +53,28 @@ function layoutBar() {   // once, in ready (it measures the titles)
   let x = (W - cw.reduce((s, w) => s + w, 0) - BAR.gap * (n - 1)) / 2;
   for (const w of cw) { BAR_CELLS.push({ x, w }); x += w + BAR.gap; }
 }
+function barState(t) {   // how much the bar shows (vis), the current chapter (ci), how much the other titles show (all)
+  const vis = BAR_CELLS.length ? win(t, BAR_SPAN[0], BAR_SPAN[1], BAR_SPAN[0] > 0 ? 0.5 : 0, 0.6) : 0;   // already up on frame 0 when it starts the film
+  let ci = 0, all = 0;
+  CHAPTER_T.forEach((c, i) => { if (t >= c.t) ci = i; });
+  if (BAR_ALL) for (const c of CHAPTER_T) all = Math.max(all, win(t, c.t - 0.2, c.t + BAR.all, c.t > 0 ? 0.4 : 0, 0.6));
+  return { vis, ci, all };
+}
+// where the bar puts its ink at t (window.film.ui): the row of cells from the dot's top to below the titles while every
+// title shows; else the row of cells, and the current title on its own
+function barBoxes(t) {
+  const { vis, ci, all } = barState(t);
+  if (vis < 0.05) return [];
+  const first = BAR_CELLS[0], last = BAR_CELLS[BAR_CELLS.length - 1], cur = BAR_CELLS[ci];
+  const tw = measure(CHAPTER_T[ci].title, { size: BAR.size }) / 2 + 6, cx = cur.x + cur.w / 2, bottom = BAR.y + 58 + BAR.size * 0.3;
+  if (all > 0.01) return [{ name: "chapter bar", box: [Math.min(first.x - 8, cx - tw), BAR.y - 9, Math.max(last.x + last.w + 8, cx + tw), bottom] }];
+  return [{ name: "chapter bar", box: [first.x - 8, BAR.y - 9, last.x + last.w + 8, BAR.y + 12] },
+    { name: "chapter title", box: [cx - tw, BAR.y + 58 - BAR.size * 0.95, cx + tw, bottom] }];
+}
 function chapterBar(t) {
   if (!BAR_CELLS.length) return;
-  const vis = win(t, BAR_SPAN[0], BAR_SPAN[1], BAR_SPAN[0] > 0 ? 0.5 : 0, 0.6);   // already up on frame 0 when it starts the film
+  const { vis, ci, all } = barState(t);
   if (vis <= 0) return;
-  let ci = 0;
-  CHAPTER_T.forEach((c, i) => { if (t >= c.t) ci = i; });
-  let all = 0;
-  if (BAR_ALL) for (const c of CHAPTER_T) all = Math.max(all, win(t, c.t - 0.2, c.t + BAR.all, c.t > 0 ? 0.4 : 0, 0.6));
   X.save(); X.globalAlpha *= vis;
   const g = X.createLinearGradient(0, 0, 0, 190);
   g.addColorStop(0, `rgba(${FILM.ui.dark},${0.55 + 0.15 * all})`); g.addColorStop(1, `rgba(${FILM.ui.dark},0)`);
@@ -97,10 +111,17 @@ function coverTitle(o) {
 }
 
 // ---- the caption (bottom): one line on a soft dark band; on a plate where the shot says light: true (a pale picture) ----
+const captionAlpha = (t, c) => Math.min(c.joinPrev ? 1 : show(t, c.start, 0.15), c.joinNext ? 1 : 1 - eIn(seg(t, c.end - 0.12, c.end)));
+function captionBox(t) {   // where the caption's letters are at t (window.film.ui), the band under them left out; null when none shows
+  const c = captionAt(t), C = FILM.caption;
+  if (!c || captionAlpha(t, c) < 0.05) return null;
+  const w = measure(c.text, { size: C.size }) / 2 + 6;
+  return [W / 2 - w, C.y - C.size * 0.95, W / 2 + w, C.y + C.size * 0.3];
+}
 function captionBand(t) {
   const c = captionAt(t);
   if (!c) return;
-  const C = FILM.caption, a = Math.min(c.joinPrev ? 1 : show(t, c.start, 0.15), c.joinNext ? 1 : 1 - eIn(seg(t, c.end - 0.12, c.end)));
+  const C = FILM.caption, a = captionAlpha(t, c);
   if (a <= 0) return;
   X.save(); X.globalAlpha *= a;
   if (SHOT_T[shotAt(t)].shot.light) {
