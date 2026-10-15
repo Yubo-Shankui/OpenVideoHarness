@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+**Canvas-film readcheck exports and output isolation**
+- `bin/vh readcheck <project> --export` now exports the live text registry successfully, without trying to export the resulting JSON again. `--out` selects the saved snapshot (and, without `--export`, checks it); an existing file needs `--force`. Ordinary canvas-film checks use private temporary snapshots, preserving hand-edited `out/texts.json` and avoiding collisions between runs. HyperFrames composition exports keep their existing behavior.
+- Regression coverage: export versus check exit codes, default and custom output paths, overwrite protection, concurrent outputs, and the project's reading pace.
+
 **Check what the film communicates within the existing storyboard and review**
 - The storyboard names what the audience already knows, what each segment adds, and what it lets them answer. For a film without narration, read its existing cards in sequence as well as checking their times.
 - Use the hardest 20–40 seconds of the storyboard or animatic to check the explanation before polishing it, within gate ② or the existing unattended checks. Quick uses its short table and existing contact sheet; no extra sample, gate or review round.
