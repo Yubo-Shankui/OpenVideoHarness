@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+**Read resolved film shots in storyboard and rhythm**
+- Canvas-film exposes `window.film.shots` with the actual start/end times, complete ids (including suffixes), chapter/segment, reads, label, unsure flags and transition metadata. A narration edit now moves the review tools with the engine's cuts.
+- Both tools choose explicit `--shots` JSON/page, then hand-written `shots.json`, then live `film.html`. JSON paths remain browser-independent; live reads wait for ready and fail on invalid data or page errors. Sources are named in output, storyboard's index and rhythm's footer. No hand-written registry is overwritten.
+- Storyboard captures real page frames when there is no video, or with `--snapshot`; manual frame and video paths remain supported. An unsure shot without a configured payoff interval no longer crashes its final summary.
+- Real-browser regressions cover changed timelines, suffixed ids, metadata, frame output, source precedence, concurrent outputs and malformed/failed pages.
+- A planned shot past the page's end leaves its tile grey, as against a short video; with no Chrome, storyboard greys the tiles and rhythm leaves out the shots lane it would read from the page (a page error still stops both). Ctrl-C closes Chrome and removes its profile; the page reader's watchdog is 120 s to ready, then 60 s a frame; frames are drawn at the millisecond, as `bin/vh frames --at`.
+
 **One music clock for film declarations and project scripts**
 - `bin/vh music` always writes its bars table, including implicit 4/4. Canvas-film can load it with `FILM.music`; deferred `musicAt()` references resolve during ready, while `musicT()` and note queries drive drawing from the same map. Bar and beat are 1-based, with explicit errors for invalid or trimmed-away positions.
 - Films without narration can take their duration from the rendered music; narrated films retain their timeline/lead/tail behavior. Cue snapshots record the hash of the music map actually loaded. Python project scripts can use the standard-library `MusicClock` reader instead of maintaining another meter table.
