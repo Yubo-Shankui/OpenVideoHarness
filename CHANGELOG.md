@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+**Confirmed alerts: a project's confirmed.json for detector findings that are intended**
+- Why: a detector judges by thresholds, and some findings are intended (a one-frame flash the storyboard asks for, a sparse passage written into the score). With no way to say so that lasts, every `check` repeated them, `--allow` only covered one run, and projects changed the film to quiet the report. Floors stay out of it.
+- `<project>/confirmed.json` (`tools/confirm.py`): an entry names the finding's time or span, why it is intended, the project file that shows it, and the key the tool printed, a coarse fingerprint of the picture or the sound there. `bin/vh check`'s isolated-frame scan (`check.iso`) and `bin/vh qa`'s scan (`qa.dropout`, `qa.pump`, `qa.click` over a span with how many) read it. A confirmed finding is still listed, marked confirmed (已确认), and no longer fails; when the picture or the sound there changes the confirmation lapses (已失效) and the finding fails again; one with nothing flagged at its time any more is listed as unused. Each open finding gets a `confirm?` line to paste. Entries with no why, evidence that is not a regular file inside the project (a folder, `../`, a link out of it), or a floor's kind (digital silence, the reading floor, the gates, the spec) are listed as not taken; cue-check OFFs and the motion warnings are not confirmable. An unreadable file fails the check rather than skipping it. Five or more confirmations of one kind in a film add a note that the detector itself may be wrong.
+- The keys, measured on the 31 style swatches: the picture key (two 8 × 6 thumbnails at 64 grey levels) is kept by 100 % of the frames of a CRF 16 copy and a 1080p CRF 18 upscale, and 99.98 % of a CRF 28 copy; a frame 0.5 s later is taken for the same 8 % of the time, and a retimed flash no longer matches its time. The picture key is coarse: a small change inside a frame (one wrong character) may not lapse it. The two designed flashes of `scratched-type` and `neon-step-print` keep their keys through both copies. The sound key (the loudness 0.5 s around the span, against its median, in 1.5 dB steps) is kept by 100 % of AAC 128k −3 dB and AAC 96k copies; a 6 dB dip of 0.5 s inside the span is never taken for the same.
+- `bin/vh check --allow` stays, for one run only, and says so (`declared (--allow, this run only)`), with where to confirm for good.
+- `bin/vh qa` scan, dropouts: with `--stems`, the 0.1 s windows where the music stem dips as deep under its own section median (less 1 dB) are the score's own and no longer a dropout; the rest of a dropout is still reported, split where needed. A sparse passage in the score was reported as dropouts before. Pumping's stem rule now works the same way, frame by frame: before, a short dip of the stem anywhere in a longer dip of the mix excused the whole of it.
+- `playbook/02-verification.md` has a short 确认告警 section (the standard read path is 456 characters longer, quick unchanged); `tools/audio/README.md` and the help say the same.
+
 **Covers in other ratios, without their title, with a camera and a title of their own: `frames --covers --ratios` and `--no-title`, `s.cover`, titles in several colours**
 - Why: several long films each wrote their own cover script for the same mechanics: a clean background (by editing `COVERS` to drop the title, or blanking the interface in a copy of the project), a camera only for the cover (a global set inside `cover()`), a two-colour title (by overriding `coverTitle`), and 9:16, 3:4 and 4:3 covers cropped from the 16:9 frame with the title set again in a small page. These are tools now; where to crop, the framing and the type stay the project's.
 - `bin/vh frames <project> --covers --no-title`: the covers without their title, `out/covers/<id>-clean.png`. The page contract's `cover(id, o)` takes `{ title: false }` and says it obeyed (`{ title: false }` back); a page that does not say so (an engine copied before) gets no picture and a message, not a titled "clean" one.
@@ -857,7 +865,6 @@
 
   `playbook/02-verification.md`, the swatch README, video type 03, the effort table in `CLAUDE.md`, the README tool tables (both languages), `bin/vh` help and `bin/vh doctor` point at the profiles.
 
-
 **Music parts: fixes from the swatch re-scores**
 - Figures and grids no longer drop notes when their step doesn't divide the bar. Half notes in a 5-beat bar played 2 of 3 notes, and none in a 1-beat bar (banker's rounding); a step that starts inside the bar now plays, cut at the bar line. A step that used to ring past the bar line and overlap the next bar's note now stops there.
 - A section's `params` (`by_section`) now reach the mono voices (sub808, violin, cello, winds …); before, they were silently ignored. A change of params starts a new phrase.
@@ -1062,7 +1069,6 @@
   - type sizes raised.
 - Foley: `styles/<slug>/events.json` is mixed under the score. `styles/_swatch/foley.mjs` generates it from a `FOLEY` export in `swatch.js`, so picture and sound share one timing table. The foley track fades out with the score.
 - The review's systemic findings became rules in the swatch content spec (`styles/_swatch/README.md`).
-
 
 **Style library `styles/`: 26 tastes instead of one**
 - 26 presets in 6 families (film titles, brand, data, illustration and print, Chinese aesthetics, retro). Each is distilled from famous works: Saul Bass titles, *Se7en*, *Blade Runner 2049*, Wes Anderson symmetry, Wong Kar-wai step-printing, Ken Burns, Müller-Brockmann, film FUI, 3Blue1Brown, NYT / The Pudding, Gapminder, *Spider-Verse*, risograph, CRT terminals, 水墨, 敦煌, 皮影, 国潮, Reiniger's silhouettes, watercolor backgrounds, synthwave, and more.
