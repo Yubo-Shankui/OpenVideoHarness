@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+**The browser's profile goes only after Chrome's whole process group has (Linux)**
+- On Linux Chrome's GPU and renderer helpers can outlive its main process by a moment and write into the profile again, so a folder removed right after the main process exited came back (a CI case for a Ctrl-C during the removal left one behind on GitHub's Linux runner now and then). `close()` now waits for the whole group to be gone (signal 0, up to 2 s), then kills what is left, then removes the profile, which stays registered meanwhile so a Ctrl-C still removes it. An exited main process whose group is still alive now has its group killed on a Ctrl-C too.
+
 **A time map: data axes and their events on the shared film time, and sounds that hang on references instead of seconds**
 - Why: a data film's time curve (the calendar slowing near events, holds, room for each card to be read) was written by hand in each project, once for the 2D layer and again for the 3D layer; editing one event moved everything after it, and the sound scripts kept typed seconds that had to be converted after every new take of the narration or score (v0.4 D4).
 - A time map file (`version`, `axis` number / seconds / date, `knots` `[t, u]` with straight lines between them and flat stretches as holds, `events` with stable ids, optional `sources` with sha256 and a `rebuild` command) is read by canvas-film's new `src/06-time-map.js` and by `tools/audio/time_map.py`, with the same checks and the same numbers on both sides. Whatever solves the curve writes the file; the film only looks values up, once loaded in ready, so frames stay a function of t.
