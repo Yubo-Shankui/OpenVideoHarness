@@ -7,13 +7,18 @@
 ## 命令
 
 ```bash
-bin/vh desk <项目> [--port N]                  # 起服务，只听 127.0.0.1；默认 8780–8799 里第一个空闲端口；这个项目已经有一个在跑，就只打印它的地址
+bin/vh gate <项目> <n> [--desk|--page|--chat] [--wait]   # 一次停一条命令：查 gate-<n>.json，出静态页并记成这一轮，审阅方式是审阅台时在后台起服务（12 小时没人访问自己停），打印聊天消息；--wait 再像 desk wait 一样等
+bin/vh desk <项目> [--port N] [--idle 秒]       # 起服务，只听 127.0.0.1；默认 8780–8799 里第一个空闲端口；这个项目已经有一个在跑，就只打印它的地址；--idle：这么久没人访问就自己停
 bin/vh desk wait <项目> [--timeout 秒]          # 等人提交：打印反馈，退出码 0；超时退出码 3（默认 7100 s）
 bin/vh desk feedback <项目> [--round 1b] [--json]   # 打印最近一次提交，并记为"已交给 agent"
 bin/vh desk data <项目>                        # 审阅台从项目里读出了什么（JSON），排查"为什么这一页是空的"时用
 ```
 
 只用 Python 标准库，不联网，页面不从 CDN 拉任何东西，浅色和深色都有，界面有中文和英文。
+
+`bin/vh gate`（`tools/gate.py`）把一次停要做的事做完：审阅方式取 `--desk` / `--page` / `--chat`，没有就取 `LOCAL.md` 的"审阅方式"一行，再没有就按档位（`studio` 审阅台，`standard`、`quick` 静态页）。每种方式都出静态页、打印聊天消息；审阅台方式再起服务，把地址加进消息。退出码：0 发出去了（`--wait` 时是收到了提交）；1 页面写了但不合规矩，不发消息也不起服务；2 没东西可发（没有 gate JSON、服务起不来、不是审阅台却要 `--wait`）；3 `--wait` 超时。
+
+**一站的数据就是 `out/review/gate-<n>.json` 这一个文件。** 静态页（`bin/vh review`）、审阅台和以后的客户端都只渲染它（审阅台另外读下面这些项目文件），各自不另存一份。
 
 ## 读什么
 
@@ -77,7 +82,7 @@ bin/vh desk data <项目>                        # 审阅台从项目里读出�
 
 ### out/review/gate-<n>.json
 
-和 `bin/vh review` 是同一份文件，字段见 `playbook/01-pipeline.md` 的"审阅页"（`include` 照样生效）。"这一轮"是 `bin/vh review <项目> <n>` 最后做的那一页：它每次把页名写进 `out/review/.current`，审阅台和 `bin/vh desk wait` 都先读它。所以关卡 ② 之后回头出一页立意 `1b`、关卡 ③ 之后重定配音出 `E3b`、自己起名的 `final`，都会是"这一轮"。`.current` 没有，或者它指的那一页已经删了，才按流程顺序取最后一页：先按站（1、E0、E1、2、E2、E3、E4、3、E5），同一站再按页（1、1b、1c……，不分大小写）；不合这个写法的页名排在最前，彼此之间看修改时间。复制项目、碰一下旧文件，都不会改变哪一页是"这一轮"。`bin/vh review <项目>` 不写页名时，渲染的也是这一轮；要出新的一页，写上它的名字。页名是 1–24 个字母、数字、`-` 或 `_`，按磁盘上文件本来的写法算（APFS 不分大小写：写 `1D` 找到的是 `gate-1d.json`，这一页就叫 `1d`）；链接到项目外面的 gate 文件不读。审阅台另外认几个可选字段，`bin/vh review` 不管它们：
+和 `bin/vh review` 是同一份文件，字段见 `playbook/01-pipeline.md` 的"审阅页"（`include` 照样生效）。"这一轮"是 `bin/vh review <项目> <n>`（`bin/vh gate` 也一样）最后做的那一页：它每次把页名写进 `out/review/.current`，审阅台和 `bin/vh desk wait` 都先读它；违反规则、没发出去的那一页照样写出来，但不写进 `.current`，这一轮还是正在外面的那一页。所以关卡 ② 之后回头出一页立意 `1b`、关卡 ③ 之后重定配音出 `E3b`、自己起名的 `final`，都会是"这一轮"。`.current` 没有，或者它指的那一页已经删了，才按流程顺序取最后一页：先按站（1、E0、E1、2、E2、E3、E4、3、E5），同一站再按页（1、1b、1c……，不分大小写）；不合这个写法的页名排在最前，彼此之间看修改时间。复制项目、碰一下旧文件，都不会改变哪一页是"这一轮"。`bin/vh review <项目>` 不写页名时，渲染的也是这一轮；要出新的一页，写上它的名字。页名是 1–24 个字母、数字、`-` 或 `_`，按磁盘上文件本来的写法算（APFS 不分大小写：写 `1D` 找到的是 `gate-1d.json`，这一页就叫 `1d`）；链接到项目外面的 gate 文件不读。审阅台另外认几个可选字段，`bin/vh review` 不管它们：
 
 ```json
 {
@@ -113,7 +118,8 @@ JSON 的格式：
   "items": [
     {"target": "seg:9", "status": "change", "label": "大纲 第 9 段 这一次", "text": "这个压根没有升华主题……"},
     {"target": "cap:c11", "status": "change", "label": "字幕 c11", "text": "", "orig": "信号好，一次装 8 个；信号差，只装 2 个。", "suggest": "……"},
-    {"target": "time:12.4", "status": "ask", "label": "小样 0:12.4", "text": "这里看不清", "t": 12.4}
+    {"target": "time:12.4", "status": "ask", "label": "小样 0:12.4", "text": "这里看不清", "t": 12.4},
+    {"target": "range:20-24.5", "status": "change", "label": "小样 0:20.0–0:24.5", "text": "这一段太慢", "t": 20, "t1": 24.5}
   ],
   "general": "大体可以"
 }
@@ -121,10 +127,53 @@ JSON 的格式：
 
 - `decisions`：这一页每个决定选了哪个选项；`defaulted` 列出人没动、按推荐算的。
 - `items[].status`：`ok` 可以、`change` 要改、`ask` 疑问。没标的条目都算通过。
-- `items[].target` 的前缀说明点评的是什么：`dec:` 决定、`least:` 没把握的、`deleg:` 替人定的（gate JSON `delegated` 的序号）、`concept:line` 立意、`seg:` 大纲段、`cap:` 字幕或旁白条、`shot:` 镜头、`fact:` 素材、`time:` 小样的某一秒、`atime:` 音轨的某一秒、`led:` DECISIONS 里 agent 定的事（序号）、`doc:<文件>#<小节>` 文档的某一节。
+- `items[].target` 的前缀说明点评的是什么：`dec:` 决定、`least:` 没把握的、`deleg:` 替人定的（gate JSON `delegated` 的序号）、`concept:line` 立意、`seg:` 大纲段、`cap:` 字幕或旁白条、`shot:` 镜头、`fact:` 素材、`time:` 小样的某一秒、`range:<a>-<b>` 小样的一段（秒，ASCII 数字，存到百分之一秒后仍要 a < b；小样页按 I、O 选）、`atime:` 音轨的某一秒、`chapter:<id>` 一章、`asset:<路径>` 项目里的一件素材（相对项目的路径，不出项目；路径前后、每一段前后都不能有空格）、`card:<id>` 一张立意卡、`led:` DECISIONS 里 agent 定的事（序号）、`doc:<文件>#<小节>` 文档的某一节。整个 target 都要合这个写法：结尾多一个换行、带控制字符的都不收。
+- `t` 是秒；`range:` 的条目另有 `t1`，两个都按 target 里的数存，页面发来的不算。没写 `label` 的，`desk feedback` 和 REVIEW.md 按 target 起一个（"片段 0:12.4–0:15.0""章节 c2""素材 assets/a.jpg""立意卡 B"）；一段的 `label` 后面总带着它的起止。
 - `suggest` 是人直接写的"改成"，`orig` 是原句。
 
 服务会检查：轮次对得上一份 `gate-<轮>.json`（还没有审阅页时用 `notes`），决定和选项都在那一页里，每个字段的类型、状态和 target 合法，单条文字不超过 4000 字、整份不超过 256 KiB，正文和 Content-Length 对得上；不合的回 400，不会断开连接。
+
+## 给客户端的数据
+
+客户端（审阅台，以后的 Studio）只是项目文件和 `bin/vh` 外面的一层壳：它要的数据都由命令给出，终端里的 agent 拿到的是同一份。下面的 JSON 都带 `"version": 1`；以后只加字段，改了含义就升版本号。
+
+### 一个项目到哪了：`bin/vh status <项目> [--json]`
+
+只读，只看已有的文件，不开浏览器、不跑 ffprobe（`tools/status.py`，零点一秒左右）。默认几行字；`--json` 的字段：
+
+- `project`：`path`、`slug`、`title`（BRIEF 第一行）、`type`（类型文档，如 `02-knowledge-short`）、`effort` 和 `effort_from`（BRIEF、LOCAL.md 或默认）、`director`（BRIEF 的 Director 一行）、`lang`（审阅语言）、`spec`（BRIEF 的 Spec 各行，原样的键）。
+- `stations`：按流程顺序的各站。关卡 ①②③ 总在；检查点 E0–E5 有页面、REVIEW.md 有它的一节或 Director 写了 `stop=E3` 时才在；别的名字的审阅页（`final`）自成一站；最后是交付。每站：`id`、`name`、`kind`（gate、checkpoint、page、deliver）、`state`、`pages`（这一站的页名）、`page`（最新一页的路径）、`current`（是不是这一轮）、`record`（`decided`、`said`、`waived`、`from`：从哪读出来的，`gate1`（关卡 ① 按 gatecheck 的规则）、`page`（写了这一页的节）、`stop`（这一站的节，还没有页）、`stop_by_date`（这一站的节没写页面，按日期算它是关于这一页的）、`stop_older`（这一站的节有定了，但没写页面、又早于这一页，不算）；关卡 ① 另有 `concept_on_record`）、`feedback`（这一页之后的提交：`submitted`、`handed`、`pending`、`last`）、`note`（一句为什么）。
+- `state` 七种：`done`（REVIEW.md 里有它的"定了"：先看关于最新那一页的最后一节，审阅台为提交写的那节、或写了 `gate-<n>.html` 的那节，模板的三节都预先写了；没有这种节，就看这一站自己的节，而且 REVIEW.md 要晚于这一页，`note` 里会说是按日期算的。关卡 ① 和 `bin/vh render`、`check` 用同一条规则（`tools/gatecheck.py`）：关卡 ① 的节里有定了和人的原话，DECISIONS.md 里立意定了）、`skipped`（quick 档、或用户原话授权跳过）、`waiting_person`（这一页是这一轮，还没有回音）、`waiting_agent`（人提交了还没交给 agent，或者交了但 REVIEW.md 还没写定了；或者这一轮已经往后走、这一页没有记录；或者关卡 ① 定了，但缺人的原话或 DECISIONS.md 的立意，render 和 check 会拒绝）、`in_progress`（前面都过了，agent 正朝这一站做）、`not_started`、`no_record`（standard、studio 的项目没有 REVIEW.md，模板有它之前做的：无从读起，gatecheck 也不查）。交付：`bin/vh deliver` 写过记录，或成片（`out/final*`、`out/final/`、`media/`）有一份更晚的通过的检查记录，而且关卡 ③ 过了（`done` 或 `skipped`），就是 `done`；关卡 ③ 还没过时 `note` 会说；各站都过了是 `in_progress`；没有 REVIEW.md 是 `no_record`。
+- `waiting_on`：`person`、`agent`、`nobody`（交付了）或 `unknown`（没有 REVIEW.md，又没有命令在跑）；REVIEW.md 写了暂停（`paused: true`）也是 `person`。机器写的记录（检查记录、`.render.json`、`.deliver.json`、审阅台的提交）里类型不对的字段当作没有。`next`：一句话，谁下一步做什么。
+- `review`：`current`（这一轮的页名）、`page`、`desk`（在跑时：`url`、`listening`）。
+- `open`：`review_items`（审阅台提交里标了要改、疑问，而 REVIEW.md 那一节还没写定了 / 改了的条目：`round`、`file`、`target`、`status`、`label`、`text`）、`facts_to_verify`（NOTES.md 待核实里没打勾的）。
+- `renders`：`out/`（往下三层）、`renders/`、`media/` 里的视频，新的在前，最多 10 个：`path`、`size`、`mtime`、`render`（`.render.json` 的帧数、帧率、像素、时间段）、`patches`、`delivery`（它是 `bin/vh deliver` 出的上传版时）、`check`（它最近的检查记录）。`deliveries`：`bin/vh deliver` 的记录。
+- `check`：最近一次 `bin/vh check` 的记录摘要：`record`、`video`、`at`、`verdict`、`exit`、`counts`、`fails`（前三条）、`stale`（视频在检查之后改过）。
+- `activity`：`running`（正在跑的命令）、`listening`（在跑的审阅台、`gate --wait`：是在等人，不是在干活）、`recent`（最近结束的五条），每条是下面活动记录里的一个 run。
+
+### 活动记录：`bin/vh activity <项目> [--json] [--follow] [--limit N]`
+
+每条作用在项目上的 `bin/vh` 命令往 `<项目>/.ovh/activity.jsonl` 追加 JSON 行；只读的 `status`、`activity`、`desk data`、`doctor` 不记，找不到项目的命令也不记。项目从参数里找：第一个是文件夹或文件（含 `--out=f`、`voice=f` 这种）的参数，往上最近的带 BRIEF.md 的文件夹；`review`、`gate`、`desk` 这些也认 projects/ 下的项目名。每行都有 `v`（1）、`event`、`t`（epoch 秒），属于某条命令的还有 `run`：
+
+| event | 字段 | 谁写 |
+|---|---|---|
+| `start` | `cmd`、`args`（照打的写，但不写秘密：名字（`=` 前那段）里带 key、token、secret、pass、auth、cred、cookie、header、bearer 的选项和 `名字=值` 的值，大写的 `NAME=值`、单字母选项后面的值，URL 里的 `用户:密码@`、查询参数的值和 `#` 后面，Bearer token，名字像秘密的 header，像 key 的参数，都写成 `…`；最多 24 个）、`cwd`、`pid`、`parent`（由另一条 `bin/vh` 起的） | `bin/vh` |
+| `progress` | `done`、`total`、`unit`（`render`：frames，开头、每 15 s、结尾各一行） | 工具 |
+| `note` | `summary`（一行）、`outputs`（写了哪些文件，项目里的写相对路径） | 工具：render、patch、review、gate、mix、qa、tts、check、`desk wait` |
+| `end` | `exit`（退出码；Ctrl-C 是 130，写完 `bin/vh` 再用 SIGINT 结束自己，调用它的 shell 才知道是 Ctrl-C；自己处理信号 n 的工具（desk、`desk wait`、`gate --wait`）停下时是 128 + n；被 TERM、HUP 直接杀掉的命令当场结束，没有这一行，读出来是 `gone`）、`duration`（秒；没有 `EPOCHREALTIME` 的 bash，比如 macOS 自带的 3.2，只到整秒） | `bin/vh` 的 EXIT trap；`bin/vh` exec 进去的工具（render、patch、frames 这些页面工具，desk、gate）自己写 |
+| `feedback` | `round`、`file`、`items`（按状态计数）、`decisions` | 审阅台存下一份提交时；不属于哪条命令 |
+
+`bin/vh` 把这条命令交给它起的进程：环境变量 `OVH_ACTIVITY_LOG`、`_RUN`、`_PID`、`_T0`、`_CMD`。不写进去的：环境变量、key、文件内容。每行一次 O_APPEND 的 write，几条命令同时写也不会把行写乱：`bin/vh` 写的不超过 1 KiB（bash 的 printf 会把更长的一行拆成 1024 字节一段段写），Python、Node 写的不超过 4 KiB；写不进去（磁盘满、项目只读）就丢掉这一行，命令照常跑完、不多说一句。
+
+`--json` 是 `{"version", "project", "log", "runs", "events"}`。`runs` 里每条命令一项：`run`、`cmd`、`args`、`cwd`、`pid`、`parent`、`start`、`end`、`exit`、`duration`、`summary`、`outputs`、`progress`、`state`。`state` 是 `running`（没有结束行，进程还在，开始不到 7 天）、`ok`（退出码 0）、`failed`、`gone`（没有结束行，进程也没了：被杀掉，或者机器重启过）。`events` 是不属于命令的行（`feedback`）。`--follow` 先打印最近的，再一行一行跟着打印新的；加 `--json` 是一行一个 JSON。读的时候，读不了的行跳过，类型不对的字段丢掉（`outputs` 不是列表、`summary` 不是字符串……），一行坏了不会让 `activity`、`status` 或客户端停下来。只读日志最后 4 MB。
+
+### 检查记录：`bin/vh check <视频> --json`
+
+`bin/vh check` 每跑一次，都把结果存成视频所在项目的 `out/check/<名字>.check.json`（名字是文件名去掉扩展名，前面加上 `out/` 之后的文件夹：`out/review/sketch.mp4` 是 `review-sketch`；项目外的视频不存），`bin/vh clean` 留着它。`--json` 把同一份打到标准输出，给人看的那些行改去标准错误；检查本身、退出码和不加 `--json` 时一样（`tools/checkrec.py`）。
+
+顶层：`version`、`tool`、`video`（项目里的写相对路径）、`project`、`record`、`t`、`at`、`args`（`allow`、`against`）、`exit`、`verdict`（`pass` / `fail`，和退出码一致）、`counts`（`fail`、`warn`、`info` 各几条）、`probe`（时长、大小、各条流）、`motion`（动着的帧对占比、静止占比、硬切数）、`findings`、`skipped`（没跑成的检查和原因）。读不了视频时只有 `error`。建不了临时文件夹（`mktemp -d` 失败，比如 `TMPDIR` 指向不存在的地方）时，检查照跑，输出和退出码不变，多一行提示，不存记录；`--json` 只打 `verdict`、`exit` 和 `error`。
+
+每条 finding：`kind`、`severity`（`fail` 让退出码是 1，`warn` 要看一眼，`info` 只是说一声）、`message`、`t` 和 `t1`（秒，有时间或时间段的才有）、`frame` 和 `frames`（`[第一帧, 最后一帧]`）、`evidence`（判断依据：量到的数、BRIEF 那一行、画面的 key、确认它的那一条……）、`confirmed`（confirmed.json 盖住了是 true，能确认但没确认是 false，这一类从来不在那里确认就是 null）。没确认的孤立帧还带 `confirm`：填上 why 和 evidence 就能贴进 confirmed.json 的那一条。`kind` 用 confirmed.json 的名字：`check.spec`、`check.gate`、`check.black`、`check.freeze`、`check.silence`、`check.iso`（孤立帧；`declared: true` 是这次 `--allow` 声明的，`lapsed: true` 是确认失效了）、`check.periodic`、`check.static`、`check.cut`（从暗到亮的硬切）、`check.blind`（动得太多、扫描判断不了的一段）、`check.subtitles`、`check.colour`、`check.packaging`、`check.scale`、`check.confirmed`（confirmed.json 里没用上、失效或没收下的条目）。
 
 ## 安全
 

@@ -848,13 +848,27 @@ def main():
     project = find_project(a.project)
     if not project:   # find_project said why
         return 2
+    rc, page, page_path = publish(project, a.gate, a.project)
+    if rc:
+        return rc
+    print(page.chat(page_path))
+    import activity   # tools/activity.py: this run's line in the project's log, when bin/vh ran us
+    activity.note(f"{gate_title(page.gate, 'en')}: {len(page.d['decisions'])} decision(s), {len(page.d['segments'])} segment(s)", [page_path])
+    return 0
+
+
+def publish(project, gate_arg=None, shown=None):
+    """Build out/review/gate-<n>.html (and index.html) from gate-<n>.json and, when it breaks no rule (it can be sent),
+    make it this round (.current); what is wrong goes to stderr. → (exit status as main's, the Page, the page's path);
+    no Page when nothing was written. bin/vh review prints the page's chat message after it, bin/vh gate
+    (tools/gate.py) does the rest of a stop."""
     rdir = project / "out" / "review"
     pages = _pages_on_disk(project)
-    if a.gate:
-        g = re.sub(r"\.json$", "", re.sub(r"^gate-", "", a.gate.strip()))
+    if gate_arg:
+        g = re.sub(r"\.json$", "", re.sub(r"^gate-", "", gate_arg.strip()))
         if not GATE_ID.fullmatch(g):
-            print(f"not a gate name: {a.gate!r} (1 to 24 letters, digits, - or _: 1, 2, 3, E0–E5, 2b …)", file=sys.stderr)
-            return 2
+            print(f"not a gate name: {gate_arg!r} (1 to 24 letters, digits, - or _: 1, 2, 3, E0–E5, 2b …)", file=sys.stderr)
+            return 2, None, None
         src = _on_disk(pages, g)   # spelled as on disk: on APFS "1D" finds gate-1d.json, and the page is 1d
         where = rdir / f"gate-{g}.json"
     else:
@@ -864,10 +878,10 @@ def main():
         newer = [p for p in pages if src and p.stat().st_mtime > src.stat().st_mtime]
         if newer:
             print(f"! rendering this round, {src.stem[5:]}; {', '.join(sorted(p.name for p in newer))} is newer: to render "
-                  f"a new page, name it (bin/vh review {a.project} <n>)", file=sys.stderr)
+                  f"a new page, name it (bin/vh review {shown or project} <n>)", file=sys.stderr)
     if src is None or not src.is_file():
         print(f"no review pack at {where}: write one first (playbook/01-pipeline.md, 审阅页)", file=sys.stderr)
-        return 2
+        return 2, None, None
     gate = src.stem[5:]
     try:
         data = json.loads(src.read_text(encoding="utf-8-sig"))   # a BOM from a Windows editor is fine
@@ -876,27 +890,24 @@ def main():
         data = merge_includes(project, data)
     except OSError as e:
         print(f"can't read {src}: {e.strerror or e}", file=sys.stderr)
-        return 2
+        return 2, None, None
     except ValueError as e:
         print(f"{src}: {e}", file=sys.stderr)
-        return 2
+        return 2, None, None
     page = Page(project, src, data, gate)
     try:
         doc = page.render()
     except (AttributeError, KeyError, TypeError, ValueError) as e:   # a field of the wrong shape, e.g. a string for a list
         print(f"{src}: a field has the wrong shape ({type(e).__name__}: {e}); compare with playbook/01-pipeline.md, 审阅页",
               file=sys.stderr)
-        return 2
+        return 2, None, None
     page_path = rdir / f"gate-{gate}.html"
     try:
         for p in (page_path, rdir / "index.html"):
             p.write_text(doc, encoding="utf-8")
-        # the page just made is "this round" for the review desk and its watcher, whatever its name or the order of
-        # the stops (a concept page 1b after gate 2, a voice page E3b after gate 3, a page called "final")
-        (rdir / ".current").write_text(gate + "\n", encoding="utf-8")
     except OSError as e:
         print(f"can't write {rdir}: {e.strerror or e}", file=sys.stderr)
-        return 2
+        return 2, None, None
     for w in page.warnings:
         print(f"! {w}", file=sys.stderr)
     for e in page.errors:
@@ -904,13 +915,18 @@ def main():
     segs = data["segments"]
     what = (f"{page.title()} · {len(data['decisions'])} decision(s) · {len(segs)} segment(s) · "
             f"{sum(len(s['shots']) for s in segs)} shot(s)")
-    if page.errors:
+    if page.errors:   # not sent, so not this round either: the desk and its watcher stay on the page that is out
         print(f"✗ {page_path} written with {len(page.errors)} problem(s) above ({what}); fix them before sending, "
               "so no chat message this time", file=sys.stderr)
-        return 1
+        return 1, page, page_path
+    try:   # the page just made is "this round" for the review desk and its watcher, whatever its name or the order of
+        # the stops (a concept page 1b after gate 2, a voice page E3b after gate 3, a page called "final")
+        (rdir / ".current").write_text(gate + "\n", encoding="utf-8")
+    except OSError as e:
+        print(f"can't write {rdir / '.current'}: {e.strerror or e}", file=sys.stderr)
+        return 2, None, None
     print(f"✓ {page_path}, also index.html  ({what})", file=sys.stderr)
-    print(page.chat(page_path))
-    return 0
+    return 0, page, page_path
 
 
 if __name__ == "__main__":

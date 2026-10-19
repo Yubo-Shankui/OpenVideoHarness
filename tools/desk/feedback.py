@@ -8,12 +8,15 @@ import datetime, fcntl, json, os, re, signal, sys, tempfile, threading, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))   # reader.py, for the current gate page
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+import activity   # noqa: E402  (tools/activity.py: a submission is an event in the project's activity log)
 
 MAX_BODY = 256 * 1024
 MAX_ITEMS, MAX_DECISIONS = 400, 20
 LIMIT = {"text": 4000, "suggest": 2000, "orig": 2000, "label": 300, "general": 8000}
 STATUS = ("ok", "change", "ask")
-TARGET = re.compile(r"^(dec|least|deleg|concept|seg|cap|shot|fact|time|atime|led|doc|asset):[^\x00-\x1f]{1,180}$")
+TARGET = re.compile(r"(dec|least|deleg|concept|seg|cap|shot|fact|time|atime|led|doc|asset|range|chapter|card):[^\x00-\x1f\x7f]{1,180}")   # fullmatch
+RANGE = re.compile(r"range:([0-9]+(?:\.[0-9]+)?)-([0-9]+(?:\.[0-9]+)?)")   # fullmatch: range:<a>-<b>, seconds of the film, a < b
 ROUND = re.compile(r"^[A-Za-z0-9_-]{1,24}$")
 NO_ROUND = "notes"           # comments sent while no gate page is out
 REFERENCE = re.compile(r"^## (授权跳过怎么记|给人看的提示|How to record a waived gate|Notes for the reviewer)", re.M)
@@ -96,8 +99,18 @@ def validate(project, fb):
         if not isinstance(it, dict):
             raise ValueError(f"{w}: expected an object")
         tgt, st = it.get("target"), it.get("status")
-        if not isinstance(tgt, str) or not TARGET.match(tgt):
-            raise ValueError(f"{w}.target: like cap:c04, shot:S03, time:12.4, doc:BRIEF.md#Spec")
+        if not isinstance(tgt, str) or not TARGET.fullmatch(tgt):   # (fullmatch: "$" would let a final newline through)
+            raise ValueError(f"{w}.target: like cap:c04, shot:S03, time:12.4, range:12.4-15, doc:BRIEF.md#Spec")
+        kind, _, rest = tgt.partition(":")
+        span = None
+        if kind == "range":   # ASCII digits only, and a < b as kept (to the hundredth)
+            m = RANGE.fullmatch(tgt)
+            span = (round(float(m.group(1)), 2), round(float(m.group(2)), 2)) if m else None
+            if not span or not span[0] < span[1] < 1e6:
+                raise ValueError(f"{w}.target: range:<a>-<b>, seconds of the film with a < b (range:12.4-15)")
+        elif kind == "asset" and (rest != rest.strip() or rest.startswith(("/", "~", "\\")) or re.match(r"[A-Za-z][A-Za-z0-9+.-]*:", rest)
+                                  or ".." in [s.strip() for s in re.split(r"[/\\]", rest)]):
+            raise ValueError(f"{w}.target: asset:<a path inside the project> (asset:assets/photo.jpg), not {rest[:60]!r}")
         if st not in STATUS:
             raise ValueError(f"{w}.status: ok, change or ask")
         c = {"target": tgt, "status": st, "label": _text(it.get("label"), "label", w + ".label") or tgt,
@@ -110,6 +123,8 @@ def validate(project, fb):
             if not isinstance(t, (int, float)) or isinstance(t, bool) or not 0 <= t < 1e6:
                 raise ValueError(f"{w}.t: seconds")
             c["t"] = round(float(t), 2)
+        if span:   # the span is the target's: t and t1 follow it whatever the page sent
+            c["t"], c["t1"] = span
         clean.append(c)
     lang = fb.get("lang") or "zh"
     if not isinstance(lang, str) or lang not in WORDS:
@@ -123,6 +138,29 @@ def _words(fb):
     return WORDS[lang if isinstance(lang, str) and lang in WORDS else "zh"]
 
 
+def clock(x):
+    """12.4 → 0:12.4, 75 → 1:15.0 (as the desk shows times; 59.96 → 1:00.0, not 0:60.0)"""
+    x = round(x, 1)
+    m = int(x // 60)
+    return f"{m}:{x - 60 * m:04.1f}"
+
+
+NAMES = {"zh": {"range": "片段 {x}", "chapter": "章节 {x}", "asset": "素材 {x}", "card": "立意卡 {x}", "time": "小样 {x}", "atime": "声音 {x}"},
+         "en": {"range": "Span {x}", "chapter": "Chapter {x}", "asset": "Asset {x}", "card": "Concept card {x}", "time": "Film {x}", "atime": "Sound {x}"}}
+
+
+def readable(it, lang):
+    """An item's label as REVIEW.md shows it: the one the page sent, else one made from the target; a span always says
+    its times (片段 0:12.4–0:15.0)."""
+    kind, _, rest = it["target"].partition(":")
+    span = f"{clock(it['t'])}–{clock(it['t1'])}" if kind == "range" and "t1" in it else None
+    names = NAMES.get(lang, NAMES["zh"])
+    if it["label"] == it["target"] and kind in names:
+        x = span or (clock(it["t"]) if kind in ("time", "atime") and "t" in it else rest)
+        return names[kind].format(x=x)
+    return it["label"] + (f"（{span}）" if lang == "zh" else f" ({span})") if span and span not in it["label"] else it["label"]
+
+
 def to_markdown(fb):
     """The .md copy: what the reviewer marked and wrote, one line each, their words untouched."""
     w = _words(fb)
@@ -130,7 +168,7 @@ def to_markdown(fb):
     for k, v in fb["decisions"].items():
         lines.append("- " + w["decision"].format(id=k, v=v) + (w["default"] if k in fb.get("defaulted", []) else ""))
     for it in fb["items"]:
-        line = f"- {it['label']} [{it['target']}] · {w['st'][it['status']]}"
+        line = f"- {readable(it, fb.get('lang'))} [{it['target']}] · {w['st'][it['status']]}"
         if it.get("orig") and it["target"].startswith("cap:"):
             line += w["orig"].format(x=it["orig"])
         if it.get("text"):
@@ -199,6 +237,10 @@ def save(project, fb, now=None):
         rel = f"out/review/feedback/{stem}.json"
         append_review(project, fb, md, rel)
         _write(out / f"{stem}.json", json.dumps(fb, ensure_ascii=False, indent=1) + "\n")
+    counts = {}
+    for it in fb["items"]:
+        counts[it["status"]] = counts.get(it["status"], 0) + 1
+    activity.event(project, "feedback", round=fb["round"], file=rel, items=counts, decisions=len(fb["decisions"]))
     return out / f"{stem}.json"
 
 
@@ -292,6 +334,19 @@ HANDED = ("The reviewer's words are also in REVIEW.md (a dated section): add wha
           "Items not marked pass by default.\n")
 
 
+def _handed(subs):
+    """The activity log's note for submissions handed to the agent: how many, which rounds, what was marked."""
+    n = {}
+    for _, j in subs:
+        for it in j.get("items") or []:
+            if isinstance(it, dict) and it.get("status") in STATUS:
+                n[it["status"]] = n.get(it["status"], 0) + 1
+    rounds = ", ".join(dict.fromkeys(str(j.get("round", "?")) for _, j in subs))
+    marks = ", ".join(f"{v} {k}" for k, v in n.items()) or "nothing marked"
+    activity.note(f"handed over {len(subs)} submission(s) (round {rounds}: {marks})",
+                  [f for f, _ in subs])
+
+
 def wait(project, timeout, poll=1.0, out=sys.stdout):
     """Hand the agent the reviewer's submission: print it, mark it consumed, return 0; 3 on timeout.
     A submission for the current page that arrived before the watcher was armed (say, while it was re-armed after a
@@ -307,6 +362,7 @@ def wait(project, timeout, poll=1.0, out=sys.stdout):
         mark_consumed(project, [f for f, _ in early])
         out.write(HANDED)
         out.flush()
+        _handed(early)
         return 0
     flag, start = fdir / ".listening", time.time()
     _write(flag, json.dumps({"pid": os.getpid(), "since": start, "until": start + timeout, "project": os.path.realpath(str(project))}))
@@ -331,6 +387,7 @@ def wait(project, timeout, poll=1.0, out=sys.stdout):
             mark_consumed(project, [f for f, _ in new])
             out.write(HANDED)
             out.flush()
+            _handed(new)
             return done(0)
         time.sleep(poll)
     out.write(f"no feedback within {timeout:.0f} s; arm it again: bin/vh desk wait {project}\n")

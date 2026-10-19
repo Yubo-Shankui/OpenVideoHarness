@@ -249,9 +249,9 @@ PY
   a=$(PATH="$t:$PATH" vh tts "$t" --provider edge --lang en; PATH="$t:$PATH" vh tts "$t" --provider=dashscope)
   case "$a" in *"--with edge-tts "*"--provider edge"*"--with dashscope "*) ok "tts --provider picks the provider's dependencies" ;;
     *) bad "tts --provider: uv got '$a'" ;; esac
-  # Ctrl-C (to the process group, as a terminal sends it) while a command runs through uv run ends bin/vh with 130, even
-  # when uv itself exits 2 ("Failed to get PID of child process", the race when its Python has just exited): a fake uv
-  # that does exactly that, under each command that goes through uv
+  # Ctrl-C (to the process group, as a terminal sends it) while a command runs through uv run ends bin/vh by SIGINT (130
+  # to a shell; the caller sees the Ctrl-C), even when uv itself exits 2 ("Failed to get PID of child process", the race
+  # when its Python has just exited): a fake uv that does exactly that, under each command that goes through uv
   printf '#!/bin/sh\ntrap '"'"'echo "error: Failed to get PID of child process" >&2; exit 2'"'"' INT\n: > "$UVMARK"\nwhile :; do sleep 0.05; done\n' > "$t/uv"
   if a=$(python3 - "$t" "$VH_BASH" "$ROOT/bin/vh" <<'PY'
 import os, signal, subprocess, sys, time
@@ -271,11 +271,11 @@ for r in runs:
     except OSError: pass
     try: rc = p.wait(timeout=20)
     except subprocess.TimeoutExpired: os.killpg(p.pid, signal.SIGKILL); rc = "hung"
-    if rc != 130: bad.append(f"{' '.join(r[:2])} {rc}")
+    if rc != -signal.SIGINT: bad.append(f"{' '.join(r[:2])} {rc}")
 print(", ".join(bad)); sys.exit(1 if bad else 0)
 PY
-); then ok "Ctrl-C ends every command that runs through uv run with 130, also when uv exits 2 as its Python exits"
-  else bad "Ctrl-C under uv run (command, exit; want 130): $a"; fi
+); then ok "Ctrl-C ends every command that runs through uv run by SIGINT, also when uv exits 2 as its Python exits"
+  else bad "Ctrl-C under uv run (command, exit; want -2, death by SIGINT): $a"; fi
   rm -rf "$t"
   # tts: a Gemini 429 that names a per-day quota fails at once, though it asks for 30 s; a per-minute one is still waited
   # out and retried; one naming no daily quota fails at once only past 90 s (a stub on 127.0.0.1; waits recorded, not slept)
@@ -502,7 +502,7 @@ PY
   a=$(vh clean "$c" 2>&1); rc=$?; [ -f "$c/out/draft1.mp4" ] && a="$a (draft still there)"
   b=$(OVH_TRASH_DIR="$t/home/trash" vh clean "$c" --yes --delete 2>&1); rc2=$?
   left=$(cd "$c" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | tr '\n' ' ')   # byte order: the runner's locale sorts otherwise
-  want="BRIEF.md audio/timeline.zh.json audio/voiceover.zh.raw.wav audio/voiceover.zh.wav film.html out/cues.json out/final/covers/a.png out/final/film-4k.mp4 out/review/gate-1.html src/50-shots.js "
+  want=".ovh/activity.jsonl BRIEF.md audio/timeline.zh.json audio/voiceover.zh.raw.wav audio/voiceover.zh.wav film.html out/cues.json out/final/covers/a.png out/final/film-4k.mp4 out/review/gate-1.html src/50-shots.js "   # (the activity log stays)
   if [ $rc = 0 ] && printf '%s' "$a" | grep -q '9 item(s)' && printf '%s' "$a" | grep -q '(draft still there)' && [ $rc2 = 0 ] && [ "$left" = "$want" ] \
     && [ "$(find "$t/home" -name '*.wav' | wc -l | tr -d ' ')" = 3 ] && [ "$(find "$t/home" -name '*.mp4' | wc -l | tr -d ' ')" = 2 ]
   then ok "clean: lists first; then the film, covers, review pages, the narration in use and the sources stay, the rest goes (old takes and renders to the Trash)"
@@ -526,7 +526,7 @@ PY
   mkdir -p "$c/out/check/repro"; for f in BRIEF.md source.js cut.mp4; do printf x > "$c/out/check/repro/$f"; done   # a project of its own
   b=$(OVH_TRASH_DIR="$t/home/trash3" vh clean "$c" --yes --delete 2>&1); rc3=$?
   left=$(cd "$c" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | tr '\n' ' ')
-  want="BRIEF.md out/check/clip.mp4 out/check/repro/BRIEF.md out/check/repro/cut.mp4 out/check/repro/source.js out/film-4k.bili.mp4 out/film-4k.bili.mp4.deliver.json out/film-4k.mp4 "
+  want=".ovh/activity.jsonl BRIEF.md out/check/clip.mp4 out/check/repro/BRIEF.md out/check/repro/cut.mp4 out/check/repro/source.js out/film-4k.bili.mp4 out/film-4k.bili.mp4.deliver.json out/film-4k.mp4 "
   if [ $rc = 0 ] && [ $rc2 = 0 ] && [ $rc3 = 0 ] && [ "$left" = "$want" ] && [ -f "$t/home/trash3/draft.mp4" ] \
     && printf '%s' "$a" | grep -q "record out/film-4k.bili.mp4.deliver.json stays, and what it names): out/film-4k.bili.mp4, out/film-4k.mp4" \
     && printf '%s' "$a" | grep -Eq '^ +[0-9.]+ [KMG]?B  out/check/$' && printf '%s' "$a" | grep -Eq '^ +[0-9.]+ [KMG]?B  out/draft.mp4$' \
@@ -632,6 +632,49 @@ PY
     rm -f "$t/cf/confirmed.json"
     a=$(vh check "$t/cf/odd.mp4" --allow 1.0 2>&1); rc=$?
     case "$rc:$a" in 0:*"declared (--allow, this run only): 1.000 s; to keep a declaration, confirm it in "*"/cf/confirmed.json"*) ok "check --allow says it is for this run only and where to confirm for good" ;; *) bad "check --allow in a project (rc $rc): $a" ;; esac
+    # --json: the same checks as findings (kind, severity, time, frame, evidence, confirmed), on stdout and kept as
+    # out/check/<name>.check.json; the exit status as without it; a confirmation from the record's own entry passes it
+    a=$(vh check "$t/cf/odd.mp4" --json 2>/dev/null); rc=$?
+    python3 - "$t/cf" "$a" <<'PY' > "$t/cf/j1.txt" 2>&1; rc2=$?
+import json, sys
+d, out = sys.argv[1], sys.argv[2]
+j = json.loads(out); rec = json.load(open(d + "/out/check/odd.check.json", encoding="utf-8"))
+iso = [f for f in j["findings"] if f["kind"] == "check.iso"]
+ok = j == rec and j["version"] == 1 and j["exit"] == 1 and j["verdict"] == "fail" and j["video"] == "odd.mp4" and j["record"] == "out/check/odd.check.json"
+ok = ok and len(iso) == 1 and iso[0]["severity"] == "fail" and iso[0]["t"] == 1.0 and iso[0]["frame"] == 30 and iso[0]["confirmed"] is False
+ok = ok and iso[0]["confirm"]["tool"] == "check.iso" and iso[0]["evidence"]["key"].startswith("pic:") and j["counts"]["fail"] == 1
+json.dump({"items": [dict(iso[0]["confirm"], why="the red flash", evidence="STORYBOARD.md S01")]}, open(d + "/confirmed.json", "w"))
+print(out[:300]); sys.exit(0 if ok else 1)
+PY
+    b=$(vh check "$t/cf/odd.mp4" --json 2>/dev/null); rc3=$?
+    c=$(vh check "$t/sp/out/fps25.mp4" --json 2>/dev/null); rc4=$?
+    d=$(vh check "$t/clean.mp4" --json 2>/dev/null); rc5=$?
+    e=$(vh clean "$t/cf" 2>&1)
+    if [ $rc = 1 ] && [ $rc2 = 0 ] && [ $rc3 = 0 ] && [ $rc4 = 1 ] && [ $rc5 = 0 ] && [ ! -e "$t/check" ] && python3 - "$b" "$c" "$d" <<'PY'
+import json, sys
+b, c, d = (json.loads(x) for x in sys.argv[1:4])
+iso = [f for f in b["findings"] if f["kind"] == "check.iso"]
+spec = [f for f in c["findings"] if f["kind"] == "check.spec"]
+sys.exit(0 if iso and iso[0]["confirmed"] is True and iso[0]["severity"] == "info" and iso[0]["evidence"]["entry"]["why"] == "the red flash"
+         and b["verdict"] == "pass" and spec and spec[0]["severity"] == "fail" and "25.000 fps" in spec[0]["message"]
+         and spec[0]["evidence"]["measured"]["fps"] == 25 and d["record"] is None and d["verdict"] == "pass" else 1)
+PY
+    then case "$e" in *"stays in out/check (bin/vh check's records): "*"out/check/odd.check.json"*) ok "check --json: findings with kind, severity, time, frame, evidence and confirmation, the same exit status, kept as out/check/<name>.check.json (clean keeps it); none kept outside a project" ;;
+        *) bad "clean does not keep check records: $(printf '%s' "$e" | tail -c 300)" ;; esac
+    else bad "check --json (rc $rc/$rc2/$rc3/$rc4/$rc5): $(tail -c 300 "$t/cf/j1.txt") | $(printf '%s' "$b$c" | head -c 600)"; fi
+    rm -f "$t/cf/confirmed.json"
+    # no scratch folder (mktemp -d fails): the same checks, lines and exit, one warning, no record; and freezedetect's
+    # duration line (before its end line) goes to its own span, not to the span before
+    a=$(vh check "$t/cf/odd.mp4" 2>/dev/null); rc=$?; rm -f "$t/cf/out/check/odd.check.json"
+    b=$(TMPDIR="$t/no-such-folder" vh check "$t/cf/odd.mp4" 2>"$t/cf/notmp.err"); rc2=$?
+    c=$(TMPDIR="$t/no-such-folder" vh check "$t/cf/odd.mp4" --json 2>/dev/null); rc3=$?
+    d=$(python3 -c 'import sys; sys.path.insert(0, "tools"); import checkrec as C
+f = C.detect_findings("\n".join("lavfi.freezedetect.freeze_%s: %s" % x for x in [("start", 1), ("duration", 4), ("end", 5), ("start", 10), ("duration", 3.5), ("end", 13.5)]))
+print([x["evidence"]["duration"] for x in f])')
+    if [ $rc = 1 ] && [ $rc2 = 1 ] && [ "$a" = "$b" ] && [ "$(grep -c 'no scratch folder' "$t/cf/notmp.err")" = 1 ] && [ ! -e "$t/cf/out/check/odd.check.json" ] \
+      && [ $rc3 = 1 ] && case "$c" in *'"verdict": "fail", "error": "no scratch folder'*) true ;; *) false ;; esac && [ "$d" = "[4.0, 3.5]" ]
+    then ok "check with no scratch folder: the same lines and exit status, one warning, no record; each frozen span keeps its own duration"
+    else bad "check without mktemp (rc $rc/$rc2/$rc3): $(tail -c 300 "$t/cf/notmp.err") | $c | freeze durations $d"; fi
     if command -v uv >/dev/null; then   # qa scan: a sparse passage (a dropout), a burst of clicks; the stems' own dip; confirmed.json
       qs() { uv run -q --no-project --with numpy --with scipy python "$ROOT/tools/audio/qa.py" scan "$@"; }
       gen() { ffmpeg -nostdin -v error -f lavfi -i "aevalsrc='0.5*sin(2*PI*220*t)*(1-$1*min(1,max(0,min((t-3)/0.02,(5-t)/0.02))))$2':s=48000:d=10" -ac 2 -c:a pcm_s16le "$3"; }
@@ -1168,6 +1211,24 @@ errs = [(p.wait(), p.stderr.read()) for p in procs]
 parts = [n for n in os.listdir(fd2) if n.endswith(".part")]
 want(all(rc == 0 for rc, _ in errs) and len([n for n in feedback.consumed(c) if n.startswith("w")]) == 320 and not parts,
      f"8 concurrent writers: exits {[rc for rc, _ in errs]}, {len(feedback.consumed(c))} names, leftovers {parts}, {[e[-200:] for _, e in errs if e][:1]}")
+# the targets a client points at: a span, a chapter, an asset, a concept card; a span's t / t1 come from its target
+sub = lambda *its, lang="zh": {"round": "1", "lang": lang, "items": [dict({"status": "change", "text": "x"}, **i) for i in its]}   # noqa: E731
+v = feedback.validate(d, sub({"target": "range:1.5-3", "t": 9}, {"target": "chapter:c2"}, {"target": "asset:assets/a b.png"}, {"target": "card:B"}))
+want([(i["target"], i.get("t"), i.get("t1")) for i in v["items"]] == [("range:1.5-3", 1.5, 3.0), ("chapter:c2", None, None), ("asset:assets/a b.png", None, None), ("card:B", None, None)],
+     f"new targets: {v['items']}")
+for bad_t in ("range:3-1", "range:2-2", "range:-1-2", "range:a-b", "range:1", "asset:/etc/passwd", "asset:../x", "asset:a/../../x", "asset:https://x.test/a.png", "card:", "chapter:",
+              "range:1.001-1.004", "range:1-2\n", "cap:c1\n", "asset:..\n", "asset: /etc/passwd", "asset:a/ ../x", "asset:a/.. /x", "asset:x ",
+              "range:\u0661-\u0662", "range:1-\uff12", "asset:C:\\x", "seg:a\x7f"):   # rounding to equal, a final newline, spaces, other digits
+    try:
+        feedback.validate(d, sub({"target": bad_t}))
+        bad.append(f"{bad_t!r} was taken")
+    except ValueError:
+        pass
+want(feedback.clock(59.96) == "1:00.0" and feedback.clock(12.44) == "0:12.4", f"clock: {feedback.clock(59.96)}, {feedback.clock(12.44)}")
+md = feedback.to_markdown(dict(feedback.validate(d, sub({"target": "range:1.5-3"}, {"target": "card:B"}, {"target": "asset:assets/a.png"}, {"target": "chapter:c2"})), submitted_at="t"))
+want("- 片段 0:01.5–0:03.0 [range:1.5-3] · 要改：x" in md and "- 立意卡 B [card:B]" in md and "- 素材 assets/a.png [asset:assets/a.png]" in md and "- 章节 c2 [chapter:c2]" in md, f"zh labels: {md}")
+md = feedback.to_markdown(dict(feedback.validate(d, sub({"target": "range:75-80", "label": "the bridge"}, lang="en")), submitted_at="t"))
+want("- the bridge (1:15.0–1:20.0) [range:75-80] · change: x" in md, f"en label with its span: {md}")
 if bad:
     print("; ".join(bad))
 sys.exit(1 if bad else 0)
@@ -1235,12 +1296,19 @@ if what == "serve":
     want(req("POST", "/api/feedback", fb(round="9"), H)[0] == 400, "a round with no gate page")
     want(req("POST", "/api/feedback", fb(decisions={"look": "L9"}), H)[0] == 400, "an option the gate page doesn't have")
     want(req("POST", "/api/feedback", fb(items=[{"target": "x", "status": "ok"}]), H)[0] == 400, "a bad target")
+    want(req("POST", "/api/feedback", fb(items=[{"target": "range:5-2", "status": "change"}]), H)[0] == 400, "a backward range")
+    want(req("POST", "/api/feedback", fb(items=[{"target": "asset:../../etc/passwd", "status": "change"}]), H)[0] == 400, "an asset outside the project")
     want(json.loads(req("GET", "/api/status")[2])["listening"] is False, "listening before the watcher")
 elif what == "status":
     print(json.loads(req("GET", "/api/status")[2])["listening"])
 elif what == "post":   # no watcher: argv[4] is the comment
     s, _, d = req("POST", "/api/feedback", fb(items=[{"target": "seg:2", "status": "change", "label": "大纲 第 2 段", "text": sys.argv[4]}]), H)
     want(s == 200, f"post: {s} {d[:200]}")
+elif what == "targets":   # a span, a chapter, an asset and a concept card, as a client sends them
+    s, _, d = req("POST", "/api/feedback", fb(items=[{"target": "range:12.4-15", "status": "change", "text": "这一段太慢"},
+        {"target": "chapter:c2", "status": "ask", "text": "这一章要不要"}, {"target": "asset:assets/photo.jpg", "status": "change", "text": "换一张"},
+        {"target": "card:B", "status": "ok"}]), H)
+    want(s == 200, f"targets: {s} {d[:200]}")
 else:
     want(json.loads(req("GET", "/api/status")[2])["listening"] is True, "the page doesn't see the watcher")
     s, _, d = req("POST", "/api/feedback", fb(), H)
@@ -1277,6 +1345,17 @@ PY
   a=$(python3 "$t/client.py" "$url" "$t/p" post "第三条" && vh desk feedback "$t/p")
   vh desk wait "$t/p" --timeout 1 >/dev/null 2>&1; rc=$?
   case "$rc:$a" in 3:*"第三条"*) ok "desk feedback counts what it printed as handed over" ;; *) bad "desk feedback then wait: rc $rc: $(printf '%s' "$a" | head -c 300)" ;; esac
+  # the new targets through the server: kept with the span's seconds, printed and written into REVIEW.md readably
+  a=$(python3 "$t/client.py" "$url" "$t/p" targets && vh desk feedback "$t/p" --json) && b=$(vh desk feedback "$t/p")
+  if python3 - "$a" "$t/p/REVIEW.md" "$b" <<'PY'
+import json, sys
+d, rv, txt = json.loads(sys.argv[1]), open(sys.argv[2], encoding="utf-8").read(), sys.argv[3]
+it = {i["target"]: i for i in d["items"]}
+want = ["- 片段 0:12.4–0:15.0 [range:12.4-15] · 要改：这一段太慢", "- 章节 c2 [chapter:c2] · 疑问：这一章要不要", "- 素材 assets/photo.jpg [asset:assets/photo.jpg] · 要改：换一张", "- 立意卡 B [card:B] · 可以"]
+sys.exit(0 if (it["range:12.4-15"]["t"], it["range:12.4-15"]["t1"]) == (12.4, 15.0) and all(w in rv and w in txt for w in want) else 1)
+PY
+  then ok "desk: range, chapter, asset and card targets are taken, keep the span's seconds, and read plainly in desk feedback and REVIEW.md; a backward span or a path out of the project is refused"
+  else bad "desk new targets: $(printf '%s' "$a$b" | tail -c 600)"; fi
   # a copy of the project carries the running server's .desk.json and a .listening that names another folder: neither counts
   cp -R "$t/p" "$t/p2" && printf '{"pid": %s, "since": 0, "until": 99999999999, "project": "%s"}\n' "$$" "$t/p" > "$t/p2/out/review/feedback/.listening"
   if desk_start "$t/p2" "$t/srv2.log"; then
@@ -1303,6 +1382,324 @@ PY
   if grep -q '没回的决定按推荐走' "$t/rz/out/review/gate-1.html" && grep -q 'unanswered goes by its recommendation' "$t/re/out/review/gate-1.html" \
     && case "$a" in *"没回的决定按推荐走"*) true ;; *) false ;; esac
   then ok "review: the page and the chat message say a decision left unanswered goes by its recommendation"; else bad "review: unanswered decisions not explained: $a"; fi
+  gate_stop_checks "$t"
+  rm -rf "$t"
+}
+# bin/vh gate: one stop in one command. The page channel (a flag, LOCAL.md's 审阅方式, the effort's default) prints the
+# chat message and starts nothing; --wait there is refused; a page that breaks a rule sends nothing and starts no desk; the
+# desk channel starts the desk in the background (once), adds its address, and with --wait hands over the submission;
+# desk --idle stops a desk nobody asks anything
+gate_stop_checks() {
+  local t=$1 g a b rc rc2 rc3 i pid url
+  g="$t/g"; cp -R tools/desk/fixtures/zh "$g"; rm -rf "$g/out/review/feedback" "$g/out/review/.current"
+  printf '%s\n' '# LOCAL' '- 审阅方式：{对话 | 审阅页 | 审阅台}（不填按档位）' > "$t/LOCAL-tpl.md"; printf '%s\n' '# LOCAL' '- 审阅方式：对话' > "$t/LOCAL-chat.md"
+  a=$(vh gate "$g" 1 --page 2>"$t/g1.err"); rc=$?
+  vh gate "$g" 1 --page --wait >/dev/null 2>"$t/g2.err"; rc2=$?
+  b=$(OVH_LOCAL_MD="$t/LOCAL-chat.md" vh gate "$g" 1 2>&1)
+  if [ $rc = 0 ] && [ $rc2 = 2 ] && case "$a" in *"要你定 1 件事"*"页面："*"/out/review/gate-1.html") true ;; *) false ;; esac \
+    && [ "$(cat "$g/out/review/.current")" = 1 ] && [ ! -e "$g/out/review/.desk.json" ] && grep -q 'waits for the review desk' "$t/g2.err" \
+    && case "$b" in *"reviewed on the chat (LOCAL.md)"*) true ;; *) false ;; esac && [ ! -e "$g/out/review/.desk.json" ]
+  then ok "gate: --page and LOCAL.md's 审阅方式 print the chat message, make the page this round and start no desk; --wait without the desk is refused"
+  else bad "gate on the page (rc $rc/$rc2): $a | $(cat "$t/g1.err" "$t/g2.err") | $b"; fi
+  # a page that breaks a rule: written, but no message and no desk; a standard project with LOCAL.md's placeholder: the page
+  sed 's/"recommend": "L1", //' "$g/out/review/gate-1.json" > "$g/out/review/gate-1b.json"
+  a=$(vh gate "$g" 1b --desk --port 0 2>/dev/null); rc=$?
+  vh review "$g" 1b >/dev/null 2>&1; rc3=$?
+  cp -R "$g" "$t/gs" && sed 's/^- Effort: studio/- Effort: standard/' "$g/BRIEF.md" > "$t/gs/BRIEF.md"
+  b=$(OVH_LOCAL_MD="$t/LOCAL-tpl.md" vh gate "$t/gs" 1 2>&1); rc2=$?
+  if [ $rc = 1 ] && [ $rc3 = 1 ] && [ -z "$a" ] && [ -f "$g/out/review/gate-1b.html" ] && [ "$(cat "$g/out/review/.current")" = 1 ] && [ ! -e "$g/out/review/.desk.json" ] \
+    && [ $rc2 = 0 ] && case "$b" in *"reviewed on the page (effort standard (BRIEF))"*) true ;; *) false ;; esac && [ ! -e "$t/gs/out/review/.desk.json" ]
+  then ok "gate and review: a page that breaks a rule is written but sends nothing, starts no desk and does not become this round; LOCAL.md's unfilled line falls back to the effort (standard: the page)"
+  else bad "gate with a broken page or a placeholder (rc $rc/$rc3/$rc2, this round $(cat "$g/out/review/.current")): $a | $b"; fi
+  # the desk channel (studio): started once in the background, its address in the message; --wait hands over a submission
+  a=$(vh gate "$g" 1 --port 0 2>/dev/null); rc=$?
+  b=$(vh gate "$g" 1 --port 0 2>&1); rc2=$?
+  pid=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["pid"])' "$g/out/review/.desk.json" 2>/dev/null)
+  url=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["url"])' "$g/out/review/.desk.json" 2>/dev/null)
+  "$VH_BASH" "$ROOT/bin/vh" gate "$g" 1 --wait --timeout 30 > "$t/gw.out" 2>&1 & i=$!
+  for rc3 in $(seq 50); do [ -f "$g/out/review/feedback/.listening" ] && break; sleep 0.2; done
+  python3 "$t/client.py" "$url" "$g" submit >/dev/null; wait $i; rc3=$?
+  if [ $rc = 0 ] && [ $rc2 = 0 ] && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && case "$a" in *"审阅台：http://127.0.0.1:"*"然后回到这里说一声"*) true ;; *) false ;; esac \
+    && case "$b" in *"already serving this project"*) true ;; *) false ;; esac && [ $rc3 = 0 ] && grep -q '我在后台等着' "$t/gw.out" && grep -q '第 0 帧就要有水声' "$t/gw.out" \
+    && python3 - "$g/.ovh/activity.jsonl" <<'PY'
+import json, sys
+recs = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8")]
+gates = {r["run"] for r in recs if r["event"] == "start" and r["cmd"] == "gate"}
+desk = [r for r in recs if r["event"] == "start" and r["cmd"] == "desk"]
+sys.exit(0 if len(desk) == 1 and desk[0].get("parent") in gates and any(r["event"] == "feedback" for r in recs) else 1)
+PY
+  then ok "gate: the desk channel starts the desk once in the background (its run's parent is the gate), puts its address in the message; --wait hands over the submission"
+  else bad "gate on the desk (rc $rc/$rc2/$rc3): $a | $b | $(tail -c 400 "$t/gw.out")"; fi
+  [ -z "$pid" ] || { kill "$pid" 2>/dev/null; for i in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done; }
+  # desk --idle: a desk nobody asks anything stops by itself, and takes its .desk.json with it
+  "$VH_BASH" "$ROOT/bin/vh" desk "$t/gs" --port 0 --idle 1 > "$t/idle.out" 2>&1 & pid=$!
+  for i in $(seq 100); do kill -0 $pid 2>/dev/null || break; sleep 0.1; done
+  if ! kill -0 $pid 2>/dev/null && grep -q 'no request for 1 s, stopped' "$t/idle.out" && [ ! -e "$t/gs/out/review/.desk.json" ]; then ok "desk --idle: a desk nobody asks anything stops by itself"
+  else kill $pid 2>/dev/null; bad "desk --idle 1: $(cat "$t/idle.out")"; fi
+}
+
+# bin/vh status: a new standard project works towards gate ①; a page out waits for the person; a desk submission waits for
+# the agent until it is handed over and REVIEW.md has its decision, and then the next gate is in progress; a Director stop
+# adds its checkpoint; quick skips the gates; the user's waiver skips what it names; a pause waits for the person; a delivery
+# record or a final film with a passing check record is delivered; a command running shows; the human view stays short
+status_checks() {
+  local t p q a b c d e rc rc2
+  t=$(mktemp -d "${TMPDIR:-/tmp}/vh-ci.XXXXXX")
+  OVH_PROJECTS="$t" vh new math st >/dev/null 2>&1; p=$(ls -d "$t"/*-st)
+  cat > "$t/st.py" <<'PY'
+import json, subprocess, sys
+vh, p, want = sys.argv[1:4]
+d = json.loads(subprocess.run([*vh.split("|"), "status", p, "--json"], capture_output=True, text=True).stdout)
+got = " ".join(f"{s['id']}:{s['state']}" for s in d["stations"]) + f" | {d['waiting_on']}"
+print(got if got == want else f"{got}  (want {want})")
+for k in sys.argv[4:]:   # extra checks: a python expression over d
+    if not eval(k, {"d": d}):
+        print(f"not: {k}")
+PY
+  st() { python3 "$t/st.py" "$VH_BASH|$ROOT/bin/vh" "$@"; }
+  a=$(st "$p" "1:in_progress 2:not_started 3:not_started deliver:not_started | agent" 'd["version"] == 1 and d["project"]["effort"] == "standard" and d["project"]["type"] == "01-math-science-explainer"' \
+    'd["review"]["current"] is None and d["renders"] == [] and d["check"] is None and d["open"] == {"review_items": [], "facts_to_verify": []}')
+  b=$(vh status "$p"); rc=$?
+  [ "$a" = "1:in_progress 2:not_started 3:not_started deliver:not_started | agent" ] && [ $rc = 0 ] && [ "$(printf '%s\n' "$b" | wc -l | tr -d ' ')" -le 8 ] \
+    && ok "status: a new standard project works towards gate ①, the rest not started (--json version 1; a short human view)" || bad "status of a new project (rc $rc): $a | $b"
+  # a page out (the page channel): waiting for the person; a desk submission: waiting for the agent, until handed over and recorded
+  mkdir -p "$p/out/review" && cp tools/desk/fixtures/zh/out/review/gate-1.json "$p/out/review/" && vh gate "$p" 1 --page >/dev/null 2>&1
+  a=$(st "$p" "1:waiting_person 2:not_started 3:not_started deliver:not_started | person" 'd["stations"][0]["page"] == "out/review/gate-1.html" and d["review"]["current"] == "1"')
+  python3 - "$p" <<'PY'
+import sys
+sys.path.insert(0, "tools/desk")
+import feedback
+p = sys.argv[1]
+feedback.save(p, feedback.validate(p, {"round": "1", "lang": "zh", "decisions": {"look": "L2"},
+                                       "items": [{"target": "range:3-4.5", "status": "change", "text": "这里太快"}, {"target": "card:B", "status": "ok"}]}))
+PY
+  b=$(st "$p" "1:waiting_agent 2:not_started 3:not_started deliver:not_started | agent" 'd["stations"][0]["feedback"]["pending"] == 1' \
+    '[(i["target"], i["label"]) for i in d["open"]["review_items"]] == [("range:3-4.5", "片段 0:03.0–0:04.5")]')
+  vh desk feedback "$p" >/dev/null
+  c=$(st "$p" "1:waiting_agent 2:not_started 3:not_started deliver:not_started | agent" 'd["stations"][0]["feedback"]["handed"] == 1' 'len(d["open"]["review_items"]) == 1')
+  python3 -c 'import sys; f = sys.argv[1] + "/REVIEW.md"; s = open(f, encoding="utf-8").read(); i = s.index("## 审阅台反馈"); open(f, "w", encoding="utf-8").write(s[:i] + s[i:].replace("- 定了：　改了：", "- 定了：L2，开头放慢　改了：0:03–0:04.5", 1))' "$p"   # under the desk's section
+  d=$(st "$p" "1:waiting_agent 2:not_started 3:not_started deliver:not_started | agent" '"DECISIONS.md" in d["stations"][0]["note"] and d["stations"][0]["record"]["from"] == "gate1"')
+  python3 tools/gatecheck.py "$p" >/dev/null 2>&1; rc=$?   # gate ① as render and check read it: the concept is still missing
+  python3 -c 'import sys; f = sys.argv[1] + "/DECISIONS.md"; s = open(f, encoding="utf-8").read(); open(f, "w", encoding="utf-8").write(s.replace("{待定 / 已定（关卡 ①）}", "已定（关卡 ①）：L2", 1))' "$p"
+  q=$(st "$p" "1:done 2:in_progress 3:not_started deliver:not_started | agent" 'd["open"]["review_items"] == []')
+  python3 tools/gatecheck.py "$p" >/dev/null 2>&1; rc2=$?
+  if [ "$a" = "1:waiting_person 2:not_started 3:not_started deliver:not_started | person" ] && [ "$b" = "1:waiting_agent 2:not_started 3:not_started deliver:not_started | agent" ] \
+    && [ "$c" = "1:waiting_agent 2:not_started 3:not_started deliver:not_started | agent" ] && [ "$d" = "1:waiting_agent 2:not_started 3:not_started deliver:not_started | agent" ] \
+    && [ $rc = 1 ] && [ "$q" = "1:done 2:in_progress 3:not_started deliver:not_started | agent" ] && [ $rc2 = 0 ]
+  then ok "status: a page out waits for the person; a submission waits for the agent (pending, then handed over) with its open items; gate ① is done when gatecheck says so (the decision, the words, DECISIONS.md's concept), then gate ② is in progress"
+  else bad "status through gate ① (gatecheck $rc/$rc2): $a || $b || $c || $d || $q"; fi
+  # a Director stop, a running command, a delivery record
+  python3 -c 'import sys; f = sys.argv[1] + "/BRIEF.md"; s = open(f, encoding="utf-8").read(); open(f, "w", encoding="utf-8").write(s.replace("- Director: default", "- Director: hook=own, stop=E3", 1))' "$p"
+  printf '{"v":1,"event":"start","run":"9-1","t":%s,"cmd":"render","args":["%s"],"pid":%s}\n' "$(date +%s)" "$p" "$$" >> "$p/.ovh/activity.jsonl"
+  a=$(st "$p" "1:done 2:in_progress E3:not_started 3:not_started deliver:not_started | agent" '[r["cmd"] for r in d["activity"]["running"]] == ["render"]')
+  b=$(vh status "$p")
+  mkdir -p "$p/out" && : > "$p/out/final.mp4" && : > "$p/out/final.upload.mp4"
+  printf '{"tool": "bin/vh deliver", "output": "final.upload.mp4", "master": "final.mp4", "time": "2026-10-19T12:00:00"}\n' > "$p/out/final.upload.mp4.deliver.json"
+  c=$(st "$p" "1:done 2:in_progress E3:not_started 3:not_started deliver:not_started | agent" 'd["deliveries"][0]["output"] == "out/final.upload.mp4"' \
+    'sorted(r["path"] for r in d["renders"]) == ["out/final.mp4", "out/final.upload.mp4"]' '"gate ③ is not decided" in d["stations"][-1]["note"]')
+  python3 -c 'import sys; f = sys.argv[1] + "/REVIEW.md"; s = open(f, encoding="utf-8").read(); i = s.index("## 关卡 ③"); open(f, "w", encoding="utf-8").write(s[:i] + s[i:].replace("- 原话：\n", "- 原话：“可以发了”\n", 1).replace("- 定了：　改了：", "- 定了：发布　改了：无", 1))' "$p"
+  d=$(st "$p" "1:done 2:not_started E3:not_started 3:done deliver:done | agent" 'd["stations"][-1]["note"] == "bin/vh deliver: out/final.upload.mp4"')
+  if [ "$a" = "1:done 2:in_progress E3:not_started 3:not_started deliver:not_started | agent" ] && case "$b" in *"running: render"*) true ;; *) false ;; esac \
+    && [ "$c" = "1:done 2:in_progress E3:not_started 3:not_started deliver:not_started | agent" ] && [ "$d" = "1:done 2:not_started E3:not_started 3:done deliver:done | agent" ]
+  then ok "status: the Director's stop=E3 adds its checkpoint; a running command shows; bin/vh deliver's record is a delivery once gate ③ is done (before, its note says so)"
+  else bad "status with a checkpoint, a run, a delivery: $a | $b | $c | $d"; fi
+  # quick skips the gates; a waiver skips what it names; a pause waits for the person; a final film checked and passing
+  OVH_PROJECTS="$t" vh new math qk --effort quick >/dev/null 2>&1; q=$(ls -d "$t"/*-qk)
+  a=$(st "$q" "1:skipped 2:skipped 3:skipped deliver:in_progress | agent")
+  mkdir -p "$q/out/check" && : > "$q/out/final.mp4"
+  printf '{"version": 1, "video": "out/final.mp4", "t": %s, "verdict": "pass", "exit": 0, "counts": {"fail": 0, "warn": 1, "info": 0}, "findings": []}\n' "$(($(date +%s) + 5))" > "$q/out/check/final.check.json"
+  b=$(st "$q" "1:skipped 2:skipped 3:skipped deliver:done | nobody" 'd["check"]["verdict"] == "pass" and d["check"]["record"] == "out/check/final.check.json"')
+  OVH_PROJECTS="$t" vh new math wv >/dev/null 2>&1; q=$(ls -d "$t"/*-wv)
+  python3 -c 'import sys; f = sys.argv[1] + "/REVIEW.md"; s = open(f, encoding="utf-8").read(); open(f, "w", encoding="utf-8").write(s.replace("## 关卡 ① 立意和大纲\n", "## 关卡 ① 立意和大纲\n- 用户授权跳过（2026-10-19）。原话：“直接做完给我看”\n- 范围：跳过关卡 ②③\n", 1))' "$q"
+  c=$(st "$q" "1:in_progress 2:skipped 3:skipped deliver:not_started | agent")
+  printf '\n## 暂停 · 2026-10-19\n- 原话："先停一下"\n' >> "$q/REVIEW.md"
+  d=$(st "$q" "1:in_progress 2:skipped 3:skipped deliver:not_started | person" 'd["paused"] is True')
+  if [ "$a" = "1:skipped 2:skipped 3:skipped deliver:in_progress | agent" ] && [ "$b" = "1:skipped 2:skipped 3:skipped deliver:done | nobody" ] \
+    && [ "$c" = "1:in_progress 2:skipped 3:skipped deliver:not_started | agent" ] && [ "$d" = "1:in_progress 2:skipped 3:skipped deliver:not_started | person" ]
+  then ok "status: quick skips the gates; a final film with a passing check record is delivered; a waiver skips the gates it names; a pause waits for the person"
+  else bad "status: quick, waiver, pause: $a | $b | $c | $d"; fi
+  # gate ②: read from the section that names its page (the template's), whatever the dates; a section without the 页面
+  # line is read by date, and the note says so (older than the page: not counted)
+  OVH_PROJECTS="$t" vh new math s2 >/dev/null 2>&1; q=$(ls -d "$t"/*-s2)
+  python3 - "$q" <<'PY'
+import os, sys, time
+p = sys.argv[1]
+f = p + "/REVIEW.md"; s = open(f, encoding="utf-8").read()
+s = s.replace('- 原话："……"', '- 原话："选 B"', 1).replace("- 定了：{…}　改了：{…}", "- 定了：B　改了：无", 1)
+i = s.index("## 关卡 ② 分镜")
+open(f, "w", encoding="utf-8").write(s[:i] + s[i:].replace("- 原话：\n", '- 原话："分镜可以"\n', 1).replace("- 定了：　改了：", "- 定了：通过　改了：无", 1))
+d = p + "/DECISIONS.md"; s = open(d, encoding="utf-8").read(); open(d, "w", encoding="utf-8").write(s.replace("{待定 / 已定（关卡 ①）}", "已定（关卡 ①）：B", 1))
+os.makedirs(p + "/out/review", exist_ok=True)
+for n in ("gate-2.json", "gate-2.html"): open(p + "/out/review/" + n, "w").write("{}")
+os.utime(f, (time.time() - 100,) * 2)   # REVIEW.md older than the page
+PY
+  a=$(st "$q" "1:done 2:done 3:in_progress deliver:not_started | agent" 'd["stations"][1]["record"]["from"] == "page" and d["stations"][1]["note"] is None')
+  python3 -c 'import os, sys, time; f = sys.argv[1] + "/REVIEW.md"; s = open(f, encoding="utf-8").read(); open(f, "w", encoding="utf-8").write(s.replace("- 页面：`out/review/gate-2.html`（{日期}）\n", "", 1)); os.utime(f, (time.time() - 100,) * 2)' "$q"
+  b=$(st "$q" "1:done 2:waiting_person 3:not_started deliver:not_started | person" 'd["stations"][1]["record"]["from"] == "stop_older" and "not counted" in d["stations"][1]["note"]')
+  python3 -c 'import os, sys, time; os.utime(sys.argv[1] + "/REVIEW.md", (time.time() + 100,) * 2)' "$q"
+  c=$(st "$q" "1:done 2:done 3:in_progress deliver:not_started | agent" 'd["stations"][1]["record"]["from"] == "stop_by_date" and "by date" in d["stations"][1]["note"]')
+  if [ "$a" = "1:done 2:done 3:in_progress deliver:not_started | agent" ] && [ "$b" = "1:done 2:waiting_person 3:not_started deliver:not_started | person" ] \
+    && [ "$c" = "1:done 2:done 3:in_progress deliver:not_started | agent" ]
+  then ok "status: gate ② read from the template's section, which names its page, whatever the dates; without that line, by date, and the note says so"
+  else bad "status of gate ② by page and by date: $a | $b | $c"; fi
+  # no REVIEW.md (a project from before the templates had one): no record, not "in progress"; machine-written records of
+  # the wrong shape (a check record, a render's and a delivery's sidecar, a submission, activity lines) break nothing
+  OVH_PROJECTS="$t" vh new math nr >/dev/null 2>&1; q=$(ls -d "$t"/*-nr); rm "$q/REVIEW.md"
+  a=$(st "$q" "1:no_record 2:no_record 3:no_record deliver:no_record | unknown")
+  mkdir -p "$q/out/check" "$q/out/review/feedback" "$q/.ovh" && : > "$q/out/x.mp4"
+  printf '%s\n' '{"version": 1, "video": 5, "t": "x", "findings": "x", "counts": [1], "verdict": 3}' > "$q/out/check/bad.check.json"
+  printf '%s\n' '{"version": 1, "video": "out/x.mp4", "t": 1, "findings": [1, {"severity": "fail", "message": 2}], "counts": {"fail": "x"}, "exit": true}' > "$q/out/check/x.check.json"
+  printf '%s\n' '{"pixels": 5, "patches": 5, "frames": "x", "span": "y"}' > "$q/out/x.mp4.render.json"
+  printf '%s\n' '{"output": 5, "master": [1]}' > "$q/out/x.mp4.deliver.json"
+  printf '%s\n' '{"round": 5, "items": 5, "lang": 3}' > "$q/out/review/feedback/1-20261019-120000.json"
+  printf '%s\n' '{"round": "1", "items": [{"target": 5}, {"target": "range:1-2", "status": "change", "text": 7, "label": 8, "t": "a", "t1": 2}]}' > "$q/out/review/feedback/1-20261019-120001.json"
+  printf '%s\n' '{"v":1,"event":"note","run":"1-1","t":1,"outputs":5,"summary":5}' '{"v":1,"event":"end","run":"1-1","t":2,"duration":"x","exit":"y","cmd":4}' \
+    '{"v":1,"event":"start","run":"2-2","t":3,"args":5,"cwd":5,"pid":"z"}' '{"v":true,"event":"x","t":1}' '{"v":1,"event":"progress","run":"2-2","t":true,"done":"x"}' \
+    '{"v":1,"event":"feedback","t":4,"items":[1],"round":2}' > "$q/.ovh/activity.jsonl"
+  b=""
+  for c in status activity; do for d in "" --json; do
+    e=$(vh "$c" "$q" ${d:+"$d"} 2>&1) || b="$b $c $d: exit $?"
+    case "$e" in *Traceback*) b="$b $c $d: a traceback" ;; esac
+  done; done
+  [ "$a" = "1:no_record 2:no_record 3:no_record deliver:no_record | unknown" ] && [ -z "$b" ] \
+    && ok "status: no REVIEW.md is no record (waiting on: unknown); records of the wrong shape break neither status nor activity" \
+    || bad "status without REVIEW.md, or with bad records: $a |$b"
+  vh status "$t/no-such" >/dev/null 2>&1; rc=$?; [ $rc = 2 ] && ok "status: no project exits 2" || bad "status of nothing exited $rc"
+  python3 -c 'import sys; sys.path.insert(0, "tools"); import status as S; d = S.director_stops
+sys.exit(0 if d("hook=own, stop=E1, stop=E3") == d("stop=E1,E3") == d("stop = e1，E3") == {"E1", "E3"} and not d("stop=E12") and not d("nostop=E3") else 1)' \
+    && ok "status: every stop= on the Director line counts (stop=E1, stop=E3), E12 and nostop= do not" || bad "status: the Director line's stop= items"
+  rm -rf "$t"
+}
+
+# the activity log (<project>/.ovh/activity.jsonl, tools/activity.py): a command on a project adds a start, its tool's note
+# and an end with the exit status; commands without a project, and the read-only views, add nothing; keys and the
+# environment never reach it; 16 commands at once leave 32 whole lines; TERM ends a command at once (no end line), a tool
+# that handles it logs 128 + n, a Ctrl-C logs 130 and ends bin/vh by SIGINT; a project that cannot be written to changes
+# nothing in what the command does or says; bin/vh activity reads it back (and --follow as it grows). The page tools' lines
+# (render's progress, patch) are checked in film_checks
+activity_checks() {
+  local t p a b c rc rc2 i pid want la
+  t=$(mktemp -d "${TMPDIR:-/tmp}/vh-ci.XXXXXX"); p="$t/p q"   # a space in the path
+  cp -R tools/desk/fixtures/zh "$p"
+  vh review "$p" 1 >/dev/null 2>&1; rc=$?
+  vh review "$p" 9 >/dev/null 2>&1; rc2=$?
+  (cd "$p" && vh effort quick >/dev/null && vh desk data . >/dev/null && vh activity . >/dev/null)
+  OVH_CI_SECRET=topsecret-env vh timeline "$p" --token abc123 API_KEY=sk-123456 --api-key=xyz AIzaFAKEFAKE "$(printf 'a%.0s' $(seq 40))" >/dev/null 2>&1
+  vh timeline "$p" "https://user:hunter2pw@example.com/x?sig=s3cr3tsig&v=1#frag=fragval1" -k shortflagval "Authorization: Bearer bearertok1" \
+    --auth=authval1 MY_VAR=envval1 cred=credval1 Ab3dEf6.hIj9kLm2n-opQ 0123456789abcdef0123 --out=keynote.wav keepme.wav >/dev/null 2>&1
+  a=$(python3 - "$p/.ovh/activity.jsonl" <<'PY'
+import json, sys
+recs = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8")]
+text = open(sys.argv[1], encoding="utf-8").read()
+runs = {}
+for r in recs:
+    runs.setdefault(r.get("run"), []).append(r)
+seq = [[r["event"] for r in rs] for rs in runs.values()]
+want = [["start", "note", "end"], ["start", "end"], ["start", "end"], ["start", "end"]]
+review = list(runs.values())[0]
+bad = []
+if seq != want: bad.append(f"events {seq}")
+if review[0]["cmd"] != "review" or review[0]["args"][-1] != "1" or review[2]["exit"] != 0 or not review[1]["outputs"] == ["out/review/gate-1.html"]: bad.append(f"review run {review}")
+if list(runs.values())[1][-1]["exit"] != 2: bad.append("review 9 should end with exit 2")
+for s in ("abc123", "sk-123456", "xyz", "AIzaFAKE", "a" * 40, "topsecret", "OVH_CI_SECRET", "hunter2pw", "s3cr3tsig", "fragval1", "shortflagval",
+          "bearertok1", "authval1", "envval1", "credval1", "Ab3dEf6", "0123456789abcdef0123"):
+    if s in text: bad.append(f"{s} is in the log")
+shown = list(runs.values())[3][0]["args"][1:]
+if shown != ["https://…@example.com/x?sig=…&v=…#…", "-k", "…", "Authorization: …", "--auth=…", "MY_VAR=…", "cred=…", "…", "…", "--out=keynote.wav", "keepme.wav"]:
+    bad.append(f"shown as {shown}")
+print("; ".join(bad)); sys.exit(1 if bad else 0)
+PY
+  )
+  if [ $rc = 0 ] && [ $rc2 = 2 ] && [ -z "$a" ]; then ok "activity: a command on a project logs its start, its tool's note and its end with the exit status; effort, desk data and activity log nothing; keys, passwords, URL secrets, tokens and the environment never reach the log, option names and file names stay"
+  else bad "activity: review exit $rc/$rc2: $a"; fi
+  # 16 at once: every line whole (one write each), also when the arguments would fill 2 KiB (3 bytes a character)
+  rm -f "$p/.ovh/activity.jsonl"
+  for i in $(seq 16); do vh timeline "$p" >/dev/null 2>&1 & done; wait
+  a=$(python3 -c 'import json, sys; ls = open(sys.argv[1], encoding="utf-8").read().splitlines(); [json.loads(l) for l in ls]; print(len(ls))' "$p/.ovh/activity.jsonl" 2>&1)
+  rm -f "$p/.ovh/activity.jsonl"; la=(); for i in $(seq 30); do la+=("$(printf '片%.0s' $(seq 100))"); done
+  for i in $(seq 16); do vh timeline "$p" "${la[@]}" >/dev/null 2>&1 & done; wait
+  c=$(python3 -c 'import json, sys; ls = open(sys.argv[1], "rb").read().splitlines(); r = [json.loads(l) for l in ls]; print(len(ls), max(map(len, ls)) < 1024, r[0]["args"][-1])' "$p/.ovh/activity.jsonl" 2>&1)
+  [ "$a" = 32 ] && [ "$c" = "32 True …" ] && ok "activity: 16 commands at once leave 32 whole lines, also with long arguments (cut to stay under 1 KiB)" || bad "activity: 16 concurrent commands left: $a / $c"
+  # signals: a tool bin/vh exec'd into writes its own end, 128 + the signal (desk wait, the desk itself); a command bash
+  # waits on (a stand-in uv that never ends): TERM ends bin/vh at once, with no end line (the run reads as gone), and a
+  # Ctrl-C (SIGINT to the process group) writes the end with 130 and then ends bin/vh by SIGINT (the caller sees -2)
+  rm -f "$p/.ovh/activity.jsonl"; mkdir -p "$t/stub"
+  printf '#!/bin/sh\n: > "$UVMARK"\nwhile :; do sleep 0.05; done\n' > "$t/stub/uv"; chmod +x "$t/stub/uv"
+  : > "$p/audio/mix.wav"
+  a=$(python3 - "$VH_BASH" "$ROOT" "$p" "$t" <<'PY'
+import json, os, signal, subprocess, sys, time
+sh, root, p, t = sys.argv[1:]
+env, mark = dict(os.environ, PATH=f"{t}/stub:{os.environ['PATH']}", UVMARK=f"{t}/started"), f"{t}/started"
+def start(*args, until):
+    if os.path.exists(mark): os.remove(mark)
+    pr = subprocess.Popen([sh, f"{root}/bin/vh", *args], start_new_session=True, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(300):
+        if os.path.exists(until) or pr.poll() is not None: break
+        time.sleep(0.05)
+    return pr
+def stub():
+    return subprocess.run(["pgrep", "-f", f"{t}/stub/uv"], capture_output=True).returncode == 0
+out = []
+pr = start("desk", "wait", p, "--timeout", "30", until=f"{p}/out/review/feedback/.listening")
+time.sleep(0.3); pr.send_signal(signal.SIGTERM); out.append(f"wait {pr.wait(10)}")   # (its handlers come just after the flag)
+pr = start("desk", p, "--port", "0", until=f"{p}/out/review/.desk.json")
+time.sleep(0.5); pr.send_signal(signal.SIGTERM); out.append(f"desk {pr.wait(10)}")
+pr = start("qa", f"{p}/audio/mix.wav", until=mark)
+t0 = time.time(); pr.send_signal(signal.SIGTERM)   # to bin/vh alone, as kill <pid> does: it must not wait for the stand-in
+try: rc = pr.wait(5)
+except subprocess.TimeoutExpired: rc = "waited"
+out.append(f"qa {rc} " + ("at once" if time.time() - t0 < 2 and stub() else "late"))
+subprocess.run(["pkill", "-f", f"{t}/stub/uv"])
+pr = start("qa", f"{p}/audio/mix.wav", until=mark)
+os.killpg(pr.pid, signal.SIGINT); out.append(f"qa {pr.wait(10)}")
+subprocess.run(["pkill", "-f", f"{t}/stub/uv"])
+recs = [json.loads(x) for x in open(f"{p}/.ovh/activity.jsonl", encoding="utf-8")]
+out.append(" ".join(f"{r['cmd']}:{r['exit']}" for r in recs if r["event"] == "end"))
+j = json.loads(subprocess.run([sys.executable, f"{root}/tools/activity.py", p, "--json"], capture_output=True, text=True).stdout)
+out.append(" ".join(f"{r['cmd']}:{r['state']}" for r in j["runs"]))
+print(" · ".join(out))
+PY
+)
+  want="wait 143 · desk 143 · qa -15 at once · qa -2 · desk:143 desk:143 qa:130 · desk:failed desk:failed qa:gone qa:failed"
+  [ "$a" = "$want" ] && ok "activity: TERM ends a command at once (no end line: gone), a tool that handles it logs 128 + n; Ctrl-C logs 130 and ends bin/vh by SIGINT" \
+    || bad "activity on signals: '$a' (want '$want')"
+  # a closed pipe (bin/vh check … | head): check's scratch folder still goes, nothing stale lands in the log, and the EXIT
+  # trap says nothing of its own (bash 5 runs it on SIGPIPE; bash 3.2 wrote the failed output into the next redirect, and
+  # into $(date))
+  if command -v ffmpeg >/dev/null; then
+    mkdir -p "$t/pipetmp" "$p/out"; rm -f "$p/.ovh/activity.jsonl"
+    ffmpeg -nostdin -v error -f lavfi -i testsrc=s=160x90:r=10:d=1 -pix_fmt yuv420p "$p/out/pipe.mp4"
+    TMPDIR="$t/pipetmp" "$VH_BASH" "$ROOT/bin/vh" check "$p/out/pipe.mp4" 2>"$t/pipe.err" | head -1 >/dev/null
+    a=$(python3 -c 'import json, sys; [json.loads(l) for l in open(sys.argv[1], encoding="utf-8")]; print("ok")' "$p/.ovh/activity.jsonl" 2>&1)
+    if [ "$a" = ok ] && [ -z "$(ls -A "$t/pipetmp")" ] && ! grep -q "arithmetic\|syntax error\|Traceback" "$t/pipe.err"
+    then ok "activity: under a closed pipe (check | head) the scratch folder goes, the log stays whole JSON, the trap says nothing"
+    else bad "check | head: log $a, left in TMPDIR: $(ls -A "$t/pipetmp"), stderr: $(tail -c 300 "$t/pipe.err")"; fi
+    rm -f "$p/out/pipe.mp4" "$p/out/check/pipe.check.json"
+  else skip "check under a closed pipe" "needs ffmpeg"; fi
+  # a project that cannot be written to: the same exit and the same words
+  a=$(vh timeline "$p" 2>&1); rc=$?
+  rm -rf "$p/.ovh"; chmod 555 "$p"
+  b=$(vh timeline "$p" 2>&1); rc2=$?
+  chmod 755 "$p"
+  [ $rc = $rc2 ] && [ "$a" = "$b" ] && ok "activity: a project that cannot be written to changes nothing in what the command does or says" || bad "activity on a read-only project: exit $rc/$rc2, '$a' / '$b'"
+  # the reader: the human lines, --json, and --follow as the log grows; bin/vh new logs into the project it made
+  vh review "$p" 1 >/dev/null 2>&1; vh review "$p" 9 >/dev/null 2>&1
+  a=$(vh activity "$p"); b=$(vh activity "$p" --json)
+  "$VH_BASH" "$ROOT/bin/vh" activity "$p" --follow --json > "$t/follow.out" 2>&1 & pid=$!
+  sleep 1; vh review "$p" 1 >/dev/null 2>&1; sleep 1.2; kill $pid 2>/dev/null; wait $pid 2>/dev/null
+  if case "$a" in *"review . 1"*"✓"*"gate-1.html"*"review . 9"*"✗ exit 2"*) true ;; *) false ;; esac && python3 - "$b" "$t/follow.out" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1]); f = [json.loads(l) for l in open(sys.argv[2], encoding="utf-8") if l.strip()]
+st = [r["state"] for r in d["runs"]]
+sys.exit(0 if d["version"] == 1 and st[-2:] == ["ok", "failed"] and d["runs"][-2]["outputs"] == ["out/review/gate-1.html"]
+         and [r["event"] for r in f][-3:] == ["start", "note", "end"] else 1)
+PY
+  then ok "activity: bin/vh activity lists the runs (paths relative to the project), --json gives each run's state and outputs, --follow prints the lines as they come"
+  else bad "bin/vh activity: $(printf '%s' "$a" | tail -c 400) | $(tail -c 300 "$t/follow.out")"; fi
+  OVH_PROJECTS="$t/new" vh new math ci-act >/dev/null 2>&1
+  a=$(cat "$t"/new/*-ci-act/.ovh/activity.jsonl 2>&1)
+  case "$a" in *'"event":"start"'*'"cmd":"new"'*'"event":"end"'*'"exit":0'*'"summary":"created '*'-ci-act · math · standard"'*) ok "activity: bin/vh new logs itself into the project it made" ;;
+    *) bad "activity of bin/vh new: $a" ;; esac
   rm -rf "$t"
 }
 
@@ -1449,7 +1846,7 @@ PY
     # a folder whose name a filter graph would choke on; then its square turned blue from 1.4 s up to 1.7 s (the film's
     # frames 27–35) and those frames put back: 20–39 drawn again, the rest the film's own bytes and times. Naming only 27–29
     # leaves 30–35 changed outside the span: refused, the film untouched. A film without its sidecar is refused at once
-    mkdir -p "$t/p, x" && cp tools/film/fixture/index.html "$t/p, x/index.html"
+    mkdir -p "$t/p, x" && cp tools/film/fixture/index.html "$t/p, x/index.html" && printf '# BRIEF\n' > "$t/p, x/BRIEF.md"   # a project: its activity log below
     vh render "$t/p, x" --range 0.5:2.5 --gop 20 --workers 2 --out "$t/p, x/out/film.mp4" >/dev/null 2>&1
     sed 's/x.fillStyle = "#fc0";/x.fillStyle = t >= 1.4 \&\& t < 1.7 ? "#0cf" : "#fc0";/' tools/film/fixture/index.html > "$t/p, x/index.html"
     s0=$(cksum < "$t/p, x/out/film.mp4")
@@ -1472,6 +1869,20 @@ PY
     cp "$t/p, x/out/film.mp4" "$t/p, x/out/bare.mp4"
     a=$(vh patch "$t/p, x/out/bare.mp4" --frames 1-2 2>&1); rc=$?
     case "$rc:$a" in 2:*"no "*"bare.mp4.render.json"*) ok "patch: a film without its sidecar is refused at once (exit 2)" ;; *) bad "patch without a sidecar: exit $rc: $(printf '%s' "$a" | tail -c 400)" ;; esac
+    # the activity log of that project: render's progress and note, and the ends node wrote itself (bin/vh exec'd into it)
+    cat > "$t/act.py" <<'PY'
+import json, sys
+runs = {}
+for r in map(json.loads, open(sys.argv[1], encoding="utf-8")):
+    runs.setdefault(r["run"], []).append(r)
+print(" | ".join(" ".join(r["event"] + (":%s" % r["exit"] if r["event"] == "end" else "") for r in rs) for rs in runs.values()))
+render = next(rs for rs in runs.values() if rs[0]["cmd"] == "render")
+note = next(r for r in render if r["event"] == "note")
+sys.exit(0 if note["outputs"] == ["out/film.mp4", "out/film.mp4.render.json"] and [r["done"] for r in render if r["event"] == "progress"][-1] == 60 else 1)
+PY
+    a=$(python3 "$t/act.py" "$t/p, x/.ovh/activity.jsonl" 2>&1); rc=$?
+    case "$rc:$a" in "0:start progress progress note end:0 | start note end:1 | start note end:0 | start end:2") ok "activity: render logs its progress and what it wrote, patch its outcome; node writes the end line of a run bin/vh exec'd into" ;;
+      *) bad "activity of render and patch (rc $rc): $a" ;; esac
   fi
   if node -e 'import("./tools/film/host.mjs").then((m) => process.exit(m.findRuntime(process.cwd()) ? 0 : 1))' 2>/dev/null; then
     mkdir -p "$t/hf"
@@ -1810,7 +2221,8 @@ print(seen, p.returncode, len(glob.glob(f"{tmp}/vh-textcheck-*")), "Traceback" i
 PY
 )
     alive=$(pgrep -f "$t/tmpc" | wc -l | tr -d ' ')
-    case "$alive $a" in "0 1 130 0 False "*) ok "$c stopped with Ctrl-C (to the process group) ends with 130 and no traceback, leaving no browser profile and no Chrome" ;;
+    want=130; [ $c = readcheck ] || want=-2   # rhythm runs through uv (on_ctrl_c): bin/vh ends by SIGINT itself
+    case "$alive $a" in "0 1 $want 0 False "*) ok "$c stopped with Ctrl-C (to the process group) ends with $want and no traceback, leaving no browser profile and no Chrome" ;;
       *) bad "$c after Ctrl-C (Chrome left, browsers seen, exit, profiles left, traceback): $alive $a" ;; esac
     pkill -KILL -f "$t/tmpc" 2>/dev/null
   done
@@ -2292,11 +2704,11 @@ PY
 }
 
 case "${1:-all}" in
-  --smoke) smoke_checks; pace_checks; timeline_checks; decision_checks; gate_checks; desk_checks; textcheck_checks; film_checks ;;
+  --smoke) smoke_checks; pace_checks; timeline_checks; decision_checks; gate_checks; desk_checks; activity_checks; status_checks; textcheck_checks; film_checks ;;
   --committed)   # exactly what a push would send: HEAD in a clean temporary checkout, uncommitted changes left out
     w="$(mktemp -d "${TMPDIR:-/tmp}/vh-ci.XXXXXX")/head"; git worktree add -q --detach "$w" HEAD || exit 2
     (cd "$w" && tools/ci.sh); rc=$?; git worktree remove --force "$w"; rmdir "$(dirname "$w")"; exit $rc ;;
-  all) static_checks; doc_checks; readpath_report; smoke_checks; pace_checks; timeline_checks; decision_checks; gate_checks; desk_checks; textcheck_checks; film_checks ;;
+  all) static_checks; doc_checks; readpath_report; smoke_checks; pace_checks; timeline_checks; decision_checks; gate_checks; desk_checks; activity_checks; status_checks; textcheck_checks; film_checks ;;
   *) echo "usage: tools/ci.sh [--smoke | --committed]"; exit 2 ;;
 esac
 [ -n "$skipped" ] && printf '\033[33m! skipped, so not checked: %s\033[0m\n' "$skipped"   # said again at the end: a pass is not a pass of these

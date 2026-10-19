@@ -26,10 +26,22 @@
 #   style compare a,b,c [--frame t] | style apply <preset[,preset]> <project>   presets side by side (posters, or swatch frames at t) / attach presets to a project as references
 #   cover-preview <image> [more…] [--text-px N]   a cover at real feed sizes (Bilibili, Douyin, YouTube, Xiaohongshu) + a small-size legibility check
 #   review <project> [gate]     decision-first review page: out/review/gate-<gate>.json → gate-<gate>.html (+ index.html); prints the chat message (playbook/01-pipeline.md, 审阅页)
-#   desk <project> [--port N] | desk wait <project> [--timeout s] | desk feedback <project> [--round r] [--json] | desk data <project>
+#   gate <project> [n] [--desk|--page|--chat] [--wait] [--timeout s]   a stop in one command: checks out/review/gate-<n>.json, builds
+#                               the review page and makes it this round, opens the review desk when the stop is reviewed there
+#                               (LOCAL.md's 审阅方式; else studio: desk, standard and quick: page), prints the chat message;
+#                               --wait (desk): then waits for the submission like desk wait (tools/gate.py)
+#   desk <project> [--port N] [--idle s] | desk wait <project> [--timeout s] | desk feedback <project> [--round r] [--json] | desk data <project>
 #                               the review desk (studio's review surface, tools/desk/README.md): a local page on 127.0.0.1 where the reviewer
 #                               ticks, comments and submits; wait: block until they submit, print it, exit 0 (an agent runs it in the background);
 #                               feedback: the latest submission; data: what the desk reads from the project, as JSON
+#  where a project stands
+#   status <project> [--json]   each stop (gates ①②③, the checkpoints in use, delivery) done, skipped, waiting for the person,
+#                               waiting for the agent, in progress or not started, from the files: the gate pages, the desk's
+#                               submissions, REVIEW.md's decisions; who is waited on, the latest renders and the last check, open
+#                               review items, what runs now (tools/status.py; --json: the fields in tools/desk/README.md)
+#   activity <project> [--json] [--follow] [--limit N]   what bin/vh did there: a line per command (when, how it ended, how long,
+#                               a summary, what it wrote; a render's progress while it runs), from <project>/.ovh/activity.jsonl,
+#                               which every command on a project appends to (tools/activity.py); --follow: as it happens
 #  sound
 #   tts <project> [provider] [voice] [zh|en] [instruct] [--beats map.json] [--align gemini] [--join block|all [--candidates N]] [--resume]  voiceover from audio/script.txt
 #                               (中文 || English; [direction] per line; lines snap to beats; @speakers A=Kore B=Puck + "A: …" lines = a dialogue;
@@ -126,7 +138,7 @@
 #                               words), in order; --save keeps them in out/cues.json with the timeline's sha256, and a later run says
 #                               which cues a new take moved and by how much; --chapters: the chapter list for a description (out/chapters.txt)
 #   sheet <video> [cols] [fps] [out]  contact sheet (default: <project>/out/check/<name>-sheet-<HHMMSS>.png)
-#   check <video> [--allow t,t…] [--against <ref.mp4>]  ffprobe + the BRIEF's spec (size, rate, length; exit 1 on a mismatch) + gate ①
+#   check <video> [--allow t,t…] [--against <ref.mp4>] [--json]  ffprobe + the BRIEF's spec (size, rate, length; exit 1 on a mismatch) + gate ①
 #                               on record in a standard or studio project (REVIEW.md, DECISIONS.md; exit 1 without it) + the
 #                               publishing copy in PACKAGING.md against the platforms' length limits (a warning) +
 #                               subtitles (its tracks and the .srt beside it) shorter than it takes to read them (a warning) +
@@ -134,7 +146,10 @@
 #                               confirmed in the project's confirmed.json (a designed flash: why, evidence, and the key the scan prints,
 #                               which lapses when the picture there changes) nor declared for this run with --allow <seconds or spans a-b>;
 #                               evenly spaced ones are periodic motion, said, not failed) + motion (hard cuts from dark to bright, still stretches of 3 s or more: warnings) + colour tags; --against: a 4K render vs the approved 1080p cut
-#                               (exit 1 when the picture differs: a layout that breaks at device scale 2)
+#                               (exit 1 when the picture differs: a layout that breaks at device scale 2). The result is kept in the
+#                               video's project as out/check/<name>.check.json (bin/vh status reads the last); --json prints it instead
+#                               of the lines above (those go to stderr): each finding's kind, severity, time and frame, message,
+#                               evidence and whether confirmed.json covers it (tools/checkrec.py); the exit status is the same
 #   gif <video> [width] [fps]   palette-optimised GIF preview (for READMEs)
 #  deliver and tidy
 #   deliver <master.mp4> [--for bilibili,douyin,youtube] [--max-gb N] [--crf 16] [--out f] [--psnr sample|full|off]   the copy to upload:
@@ -144,7 +159,7 @@
 #                               a record beside the copy (<copy>.deliver.json) that bin/vh clean reads: the copy and its master stay as the film
 #   clean <project> [--yes] [--delete] [--keep path …] [--final f]   a finished project's intermediates (frames, check frames, render
 #                               chunks, drafts, old takes, stems, node_modules) to the Trash; the film (and what bin/vh deliver made from it),
-#                               covers, captions, review pages, sources, docs and the narration in use stay. Without --yes it only lists them;
+#                               covers, captions, review pages, check records, sources, docs and the narration in use stay. Without --yes it only lists them;
 #                               --delete deletes what the tools can make again
 set -euo pipefail
 unset CDPATH   # an exported CDPATH would send a relative cd (this one: bin/vh run as bin/vh) to another folder, and print it
@@ -353,6 +368,185 @@ project_dir() { # a project folder, or a name under the projects folder (the dat
   if [ "$n" = 0 ]; then echo "no such project: $a (a folder, or a name under $(rel "$base"))" >&2; else echo "$a: several projects match: $(printf '%s\n' "$m" | xargs -n1 basename | tr '\n' ' ')" >&2; fi
   return 1
 }
+
+# activity: one JSON line per event in <project>/.ovh/activity.jsonl (tools/activity.py has the format and reads it: bin/vh
+# activity). A command that works on a project gets its start line here and its end line from the EXIT trap; the run goes to
+# what it runs through OVH_ACTIVITY_* (a tool bin/vh exec's into writes the end itself). It never fails or slows a command:
+# no fork but `date` on a bash without EPOCHREALTIME, every failure dropped, and nothing at all for a command without a project
+ACT_LOG="" ACT_RUN="" ACT_T0="" ACT_SUMMARY="" ACT_PROJ="" ACT_S="" ACT_NOW="" ACT_MS=0 ACT_RC=0 ACT_DONE="" NEW_DIR="" CHECK_TMP=""
+ACT_A="" ACT_B=0 ACT_HIDE="" ACT_PNAME=""
+ACT_C0=$'\001\002\003\004\005\006\007\010\013\014\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037'
+act_now() { local r=${EPOCHREALTIME:-}   # s.mmm, or s (its digits only: after a failed write, text can come ahead of them)
+  if [ -n "$r" ]; then r=${r/,/.}; ACT_NOW=${r%???}; else ACT_NOW=$(date +%s 2>/dev/null) || true; ACT_NOW=${ACT_NOW##*[!0-9]}; ACT_NOW=${ACT_NOW:-0}; fi; }
+act_ms() { case $1 in *.*) local m="${1#*.}000"; ACT_MS=$(( ${1%.*} * 1000 + 10#${m:0:3} )) ;; *) ACT_MS=$(( $1 * 1000 )) ;; esac; }
+act_str() { # act_str <text>: the text as a JSON string into ACT_S; control characters other than \n \r \t are dropped
+  local s=$1 i c
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\n'/\\n}; s=${s//$'\r'/\\r}; s=${s//$'\t'/\\t}
+  case $s in *[$ACT_C0]*) for ((i = 0; i < ${#ACT_C0}; i++)); do c=${ACT_C0:i:1}; s=${s//"$c"/}; done ;; esac
+  ACT_S="\"$s\""
+}
+act_line() { # one line onto the run's log: one printf into an O_APPEND redirect, under 1 KiB (bash's printf writes a longer
+  # line in 1024-byte pieces, and the lines of commands running at once could come between them); a failure is dropped
+  local LC_ALL=C   # ${#…} in bytes
+  [ -n "$ACT_LOG" ] && [ ${#1} -lt 1000 ] || return 0
+  { printf '%s\n' "$1" >> "$ACT_LOG"; } 2>/dev/null || true
+}
+act_bytes() { local LC_ALL=C; ACT_B=${#1}; }   # act_bytes <text>: its length in bytes, into ACT_B
+# What a start line shows of the arguments: as typed, but never a secret. A name (an option's, a variable's: the part
+# before "=") that says key, token, secret, pass, auth, cred, cookie, header or bearer hides its value (--key=…, KEY=…, and
+# --key's next argument), so does an upper-case NAME=value (a variable), and a one-letter option hides the next argument
+# (no bin/vh command takes one). A URL's user:password@, its query values and fragment, a Bearer token, a header whose name
+# says secret and whatever looks like a key are written as …; option names, paths (whatever exists) and the project's own
+# name stay. When in doubt it is …
+act_secret() {
+  case $1 in *[Kk][Ee][Yy]*|*[Tt][Oo][Kk][Ee][Nn]*|*[Ss][Ee][Cc][Rr][Ee][Tt]*|*[Pp][Aa][Ss][Ss]*|*[Aa][Uu][Tt][Hh]*|*[Cc][Rr][Ee][Dd]*|*[Cc][Oo][Oo][Kk][Ii][Ee]*|*[Hh][Ee][Aa][Dd][Ee][Rr]*|*[Bb][Ee][Aa][Rr][Ee][Rr]*) return 0 ;; esac
+  return 1
+}
+act_keyish() { # a vendor's key prefix; 32 or more letters, digits and _; or key characters (also . + = -) with a digit among
+  # them: 32 or more, 16 or more in both cases, or 20 or more hex digits. Not a file name (name.mp4), a word, a slug, a date
+  local v=$1
+  [ ${#v} -ge 12 ] || return 1
+  case $v in sk-*|sk_*|AIza*|AQ.*|ghp_*|gho_*|ghu_*|ghs_*|github_pat_*|glpat-*|xox[abposr]-*|eyJ*|hf_*|AKIA*|ya29.*) return 0 ;; esac
+  case $v in *[!A-Za-z0-9_.+=-]*) return 1 ;; esac
+  case $v in *[!A-Za-z0-9_]*) ;; *) [ ${#v} -lt 32 ] || return 0 ;; esac
+  case $v in *[0-9]*) ;; *) return 1 ;; esac
+  case $v in *.[a-z]|*.[a-z][a-z0-9]|*.[a-z][a-z0-9][a-z0-9]|*.[a-z][a-z0-9][a-z0-9][a-z0-9]) return 1 ;; esac
+  [ ${#v} -lt 32 ] || return 0
+  case $v in *[A-Z]*) case $v in *[a-z]*) [ ${#v} -lt 16 ] || return 0 ;; esac ;; esac
+  case $v in *[!0-9a-fA-F-]*) return 1 ;; esac
+  [ ${#v} -ge 20 ]
+}
+act_value() { # act_value <text>: into ACT_A, a value as the log shows it
+  local v=$1 pre post au q k out="" n frag=""
+  case $v in *://*)   # user:password@host, and the fragment
+    pre=${v%%://*}; post=${v#*://}; au=${post%%[/?#]*}
+    case $au in *@*) post="…@${au##*@}${post#"$au"}" ;; esac
+    case $post in *'#'*) post=${post%%#*}; frag="#…" ;; esac
+    v="$pre://$post" ;;
+  esac
+  case $v in *://*'?'*|*'?'*=*)   # every query value
+    q=${v#*\?}; v=${v%%\?*}
+    while [ -n "$q" ]; do
+      k=${q%%&*}
+      case $k in *=*) k="${k%%=*}=…" ;; *) ! act_keyish "$k" || k="…" ;; esac
+      out="$out${out:+&}$k"
+      case $q in *'&'*) q=${q#*&} ;; *) q="" ;; esac
+    done
+    v="$v?$out" ;;
+  esac
+  v=$v$frag
+  case $v in *[Bb][Ee][Aa][Rr][Ee][Rr]' '*) v="${v%%[Bb][Ee][Aa][Rr][Ee][Rr] *}Bearer …" ;; esac
+  case $v in [A-Za-z]*': '*) n=${v%%:*}; case $n in *[!A-Za-z0-9_-]*) ;; *) ! act_secret "$n" || v="$n: …" ;; esac ;; esac
+  if [ "$v" = "$1" ] && [ ! -e "$v" ]; then case $ACT_PNAME in "$v"|*-"$v") ;; *) ! act_keyish "$v" || v="…" ;; esac; fi
+  ACT_A=$v
+}
+act_shown() { # act_shown <argument>: into ACT_A, the argument as the log shows it; ACT_HIDE=1 when the next one is its value
+  local a=$1 n=""
+  ACT_HIDE=""
+  case $a in
+    --?*=*) n=${a%%=*} ;;
+    [A-Za-z_]*=*) n=${a%%=*}; case $n in *[!A-Za-z0-9_.-]*) n="" ;; esac ;;
+  esac
+  if [ -n "$n" ]; then
+    if act_secret "$n"; then a="$n=…"
+    else case $n in *[!A-Z0-9_]*) act_value "${a#*=}"; a="$n=$ACT_A" ;; *) a="$n=…" ;; esac   # NAME=value: a variable's
+    fi
+  else case $a in
+    --?*) ! act_secret "${a#--}" || ACT_HIDE=1 ;;
+    -h) ;;
+    -[A-Za-z]) ACT_HIDE=1 ;;
+    -[A-Za-z]?*) a="${a:0:2}…" ;;
+    *) act_value "$a"; a=$ACT_A ;;
+  esac; fi
+  ACT_A=$a
+}
+act_project() { # act_project <command> <args…>: into ACT_PROJ, the project the command works on: the nearest folder holding
+  # BRIEF.md at or above the first argument that is a folder or a file (also --opt=f and key=f, or a file to be made in an
+  # existing folder); else, for the commands that take a project by name, a name under the projects folder. Else empty
+  local cmd=$1 a d m n base
+  ACT_PROJ=""; shift
+  for a in "$@"; do
+    case $a in -*=*|[A-Za-z_]*=*) a=${a#*=} ;; -*) continue ;; esac
+    if [ -z "$a" ]; then continue
+    elif [ -d "$a" ]; then d=$a
+    elif [ -e "$a" ]; then case $a in */*) d=${a%/*} ;; *) d=. ;; esac
+    else case $a in */*) d=${a%/*}; [ -d "${d:-/}" ] || continue ;; *) continue ;; esac
+    fi
+    case ${d:-/} in /*) ;; *) d="$PWD/$d" ;; esac
+    case $d in */.|*/..|*/./*|*/../*) d=$(cd "$d" 2>/dev/null && pwd -P) || continue ;; esac   # a subshell only when it needs one
+    d=${d%/}
+    while :; do
+      [ -f "$d/BRIEF.md" ] && { ACT_PROJ=$d; return 0; }
+      [ -n "$d" ] && [ "$d" != / ] || break
+      d=${d%/*}
+    done
+  done
+  case $cmd in review|gate|desk|storyboard|rhythm|clean|style) ;; *) return 0 ;; esac
+  base=$(projects_base)
+  for a in "$@"; do
+    case $a in -*|*/*|"") continue ;; esac
+    if [ -f "$base/$a/BRIEF.md" ]; then ACT_PROJ=$(cd "$base/$a" && pwd -P); return 0; fi
+    n=0; for m in "$base"/*-"$a"; do [ -f "$m/BRIEF.md" ] && { n=$((n + 1)); d=$m; }; done
+    if [ "$n" = 1 ]; then ACT_PROJ=$(cd "$d" && pwd -P); return 0; fi
+  done
+}
+act_start() { act_project "$@"; [ -z "$ACT_PROJ" ] || act_begin "$ACT_PROJ" "$@"; }   # act_start <command> <args…>
+act_begin() { # act_begin <project> <command> <args…>: the start line; the run handed to what the command runs (OVH_ACTIVITY_*);
+  # the EXIT trap writes its end (vh_trap), and a Ctrl-C ends it through ctrl_c_exit (the end line says 130). TERM and HUP
+  # kill bin/vh as they would without a log, at once: no end line, and the reader shows the run as gone
+  local proj=$1 cmd=$2 a args="" n=0 len=0 hide="" c parent="" line
+  shift 2
+  [ -d "$proj/.ovh" ] || mkdir "$proj/.ovh" 2>/dev/null; [ -d "$proj/.ovh" ] || return 0   # (another bin/vh may make it first)
+  [ -n "$ACT_T0" ] || { act_now; ACT_T0=$ACT_NOW; }
+  ACT_LOG="$proj/.ovh/activity.jsonl" ACT_RUN="${ACT_T0%.*}-$$" ACT_PNAME=${proj##*/}
+  for a in "$@"; do   # as typed, but never a secret (act_shown)
+    if [ -n "$hide" ]; then hide=""   # the value of a secret's option (a path to one stays; an option is one of its own)
+      case $a in -?*) act_shown "$a"; a=$ACT_A; hide=$ACT_HIDE ;; *) [ -e "$a" ] || a="…" ;; esac
+    else act_shown "$a"; a=$ACT_A; hide=$ACT_HIDE; fi
+    [ ${#a} -le 120 ] || a="${a:0:120}…"
+    act_str "$a"; act_bytes "$ACT_S"; n=$((n + 1)); len=$((len + ACT_B + 1))
+    if [ $n -gt 24 ] || [ $len -gt 480 ]; then args="$args${args:+,}\"…\""; break; fi   # (the line stays under 1 KiB)
+    args="$args${args:+,}$ACT_S"
+  done
+  case ${OVH_ACTIVITY_RUN:-} in ""|*[!0-9.-]*) ;; *) parent=",\"parent\":\"$OVH_ACTIVITY_RUN\"" ;; esac   # a bin/vh started by another
+  act_str "$cmd"; c=$ACT_S
+  a=$PWD; [ ${#a} -le 120 ] || a="…${a: -120}"; act_str "$a"; act_bytes "$ACT_S"
+  [ "$ACT_B" -le 240 ] || { a="…${a: -40}"; act_str "$a"; }   # (a path in another script: up to 3 bytes a character)
+  line="{\"v\":1,\"event\":\"start\",\"run\":\"$ACT_RUN\",\"t\":$ACT_T0,\"cmd\":$c,\"args\":[$args],\"cwd\":$ACT_S,\"pid\":$$$parent}"
+  act_bytes "$line"
+  [ "$ACT_B" -lt 1000 ] || line="{\"v\":1,\"event\":\"start\",\"run\":\"$ACT_RUN\",\"t\":$ACT_T0,\"cmd\":$c,\"args\":[\"…\"],\"cwd\":$ACT_S,\"pid\":$$$parent}"
+  act_line "$line"
+  export OVH_ACTIVITY_LOG="$ACT_LOG" OVH_ACTIVITY_RUN="$ACT_RUN" OVH_ACTIVITY_PID=$$ OVH_ACTIVITY_T0="$ACT_T0" OVH_ACTIVITY_CMD="$cmd"
+  trap ctrl_c_exit INT; vh_trap
+}
+act_end() { # act_end <status>: the run's end line (from the EXIT trap; a tool bin/vh exec'd into writes its own)
+  [ -n "$ACT_RUN" ] || return 0
+  local d s="" ms sm=$ACT_SUMMARY
+  act_now; act_ms "$ACT_NOW"; d=$ACT_MS; act_ms "$ACT_T0"; d=$((d - ACT_MS)); [ $d -ge 0 ] || d=0
+  printf -v ms '%03d' $((d % 1000))
+  [ ${#sm} -le 200 ] || sm="${sm:0:200}…"
+  [ -z "$sm" ] || { act_str "$sm"; s=",\"summary\":$ACT_S"; }
+  act_str "${OVH_ACTIVITY_CMD:-}"
+  act_line "{\"v\":1,\"event\":\"end\",\"run\":\"$ACT_RUN\",\"t\":$ACT_NOW,\"cmd\":$ACT_S,\"exit\":$1,\"duration\":$((d / 1000)).$ms$s}"
+}
+vh_trap() { # the EXIT trap, set by what needs it (a run, new's folder, check's scratch folder; a command without any has
+  # none, as before the log). Under a pipe whose reader has gone (bin/vh … | head) bash runs it on SIGPIPE: SIGPIPE ignored
+  # first and the output that failed thrown away, or bash dies at its next write and the stale output lands in the log
+  trap 'ACT_RC=$?; trap "" PIPE; set +e; { echo -n; } >/dev/null 2>&1; vh_exit' EXIT
+}
+vh_exit() { # the EXIT trap's work: an unfinished bin/vh new takes its folder away, check's scratch folder goes, and the run
+  # gets its end line when bin/vh came to its end or exits with a status (from a TERM or a HUP, bash runs it with the status
+  # of the command before: it writes none, and the run reads as gone)
+  set +e
+  if [ -n "$NEW_DIR" ]; then rm -rf "$NEW_DIR"; echo "$c_no removed the unfinished $(rel "$NEW_DIR")" >&2; NEW_DIR=""; fi
+  [ -z "$CHECK_TMP" ] || { rm -rf "$CHECK_TMP"; CHECK_TMP=""; }
+  [ -n "$ACT_DONE" ] || [ "$ACT_RC" != 0 ] || return 0
+  act_end "$ACT_RC"; ACT_RUN=""
+}
+ctrl_c_exit() { # Ctrl-C: vh_exit's work (the run's end says 130), then bin/vh ends by SIGINT itself, so the shell that runs
+  # it sees a Ctrl-C (a loop stops; an exit 130 would read as a command that handled it). $? is 130 there all the same
+  ACT_RC=130; vh_exit; trap - INT EXIT; kill -INT $$; exit 130
+}
 parse_styles() { # parse_styles "<a,b>": the preset names, one per line (spaces and empty items dropped). Fails with a message
   # on a name that is not a lower-case slug of a preset in styles/ (no paths, no _swatch, no glob), or when the list is empty.
   local s n=0 IFS=,
@@ -411,6 +605,7 @@ PY
 cmd_new() {
   [ $# -ge 2 ] || { echo "usage: bin/vh new <type> <slug> [--style <preset[,preset]>] [--effort quick|standard|studio] [--aspect 16:9|9:16|1:1|4:5|3:4] [--watch phone|feed|desktop] [--res 1080p|4k] [--lang zh|en] [--engine canvas-film] [--dir <folder>]"; cmd_types; exit 1; }
   local type=$1 slug=$2 doc style="" effort="" aspect="" res="" parent="" wh="" watch="" outres="" lang="" frameh="" engine=""; doc=$(type_doc "$type") || { echo "unknown type: $type"; cmd_types; exit 1; }
+  local typed=("$@"); act_now; ACT_T0=$ACT_NOW   # the run goes into the new project's activity log once it is made
   shift 2
   while [ $# -gt 0 ]; do case "$1" in
     --style)  style=${2:?--style needs a preset or a comma list (bin/vh style list)}; shift 2 ;;
@@ -459,8 +654,8 @@ cmd_new() {
   mkdir -p "$base" || { echo "cannot create $base"; exit 1; }
   base=$(cd "$base" && pwd); dir="$base/$(date +%F)-$slug"
   [ -e "$dir" ] && { echo "$dir already exists"; exit 1; }
-  # a step that fails from here on must not leave a half-built dir behind (a retry would say "already exists")
-  NEW_DIR=$dir; trap 'rm -rf "$NEW_DIR"; echo "$c_no removed the unfinished $(rel "$NEW_DIR")" >&2' EXIT
+  # a step that fails from here on must not leave a half-built dir behind (a retry would say "already exists"): vh_exit removes it
+  NEW_DIR=$dir; vh_trap
   if [ "$engine" = canvas-film ]; then   # a static page and its scripts: nothing to install (one command a line, so a failed copy stops here)
     mkdir -p "$dir"
     rsync -a --exclude out "$ROOT/engines/canvas-film/template/" "$dir/"
@@ -527,7 +722,8 @@ PY
     meme) sedi "s/^- Pace: normal /- Pace: brisk /" "$dir/BRIEF.md" ;;
   esac
   for s in $styles; do attach_style "$dir" "$s"; done   # presets as references: copies in style-refs/, listed in BRIEF, a DECISIONS line
-  trap - EXIT
+  NEW_DIR=""
+  ACT_SUMMARY="created ${dir##*/} · $type · ${effort:-standard}"; act_begin "$dir" new "${typed[@]}" || true
   echo "$c_ok created $(rel "$dir")"
   echo "   type doc : video-types/$doc.md"
   local fdesc="${frameh:+$aspect, }$res"   # empty for the types whose engine is not scaffolded here (math, paper, handdrawn, mv, edit)
@@ -634,20 +830,22 @@ cmd_film_tool() { # $1: frames | render | determinism | cues | fonts | patch (to
   if [ "$tool" = render ]; then
     case " $* " in *" --range"*|*" --frames"*|*" -h "*|*" --help "*) ;;
       *) local g grc=0; g=$(python3 "$ROOT/tools/gatecheck.py" "$(arg_dir "$@")" --for render) || grc=$?
-         if [ "$grc" = 1 ]; then printf '%s\n' "$g" | sed "1s/^/$c_no /" >&2; echo "   (a part of the film renders before that: --range a:b)" >&2; exit 1; fi ;;
+         if [ "$grc" = 1 ]; then printf '%s\n' "$g" | sed "1s/^/$c_no /" >&2; echo "   (a part of the film renders before that: --range a:b)" >&2
+           ACT_SUMMARY="refused: no record of gate ① (REVIEW.md, DECISIONS.md)"; exit 1; fi ;;
     esac
   fi
   b=$(film_browser "$tool" "$(arg_dir "$@")") || exit 2
   exec node "$ROOT/tools/film/$tool.mjs" --browser "$b" "$@"
 }
-on_ctrl_c() { # on_ctrl_c <command…>: run it; a Ctrl-C while it runs ends bin/vh with 130 whatever the command exits with (uv run
-  # itself exits 2, "Failed to get PID of child process", when the Ctrl-C reaches it just as its Python has exited, and bash
-  # goes on after a child that exits). Every uv run goes through it. Inside $( ) it ends that subshell: the caller exits on 130
+on_ctrl_c() { # on_ctrl_c <command…>: run it; a Ctrl-C while it runs ends bin/vh (ctrl_c_exit) whatever the command exits with
+  # (uv run itself exits 2, "Failed to get PID of child process", when the Ctrl-C reaches it just as its Python has exited,
+  # and bash goes on after a child that exits). Every uv run goes through it. Inside $( ) it ends that subshell with 130, and
+  # the caller calls ctrl_c_exit on 130
   local int=0 rc=0
   trap 'int=1' INT
   "$@" || rc=$?
-  trap - INT
-  [ "$int" = 0 ] || exit 130
+  if [ -n "$ACT_RUN" ] && [ "${BASH_SUBSHELL:-0}" = 0 ]; then trap ctrl_c_exit INT; else trap - INT; fi   # a run's own INT trap back
+  if [ "$int" != 0 ]; then [ "${BASH_SUBSHELL:-0}" = 0 ] || exit 130; ctrl_c_exit; fi
   return "$rc"
 }
 cmd_storyboard() { [ $# -gt 0 ] || { echo "usage: bin/vh storyboard <project> [--shots shots.json|film.html] [--video v.mp4 | --snapshot] [--unsure S02,S04] [--per 6]   (-h: the shots.json schema)"; exit 1; }
@@ -661,6 +859,10 @@ cmd_rhythm() { [ $# -gt 0 ] || { echo "usage: bin/vh rhythm <project> [--shots s
 cmd_cover_preview() { [ $# -gt 0 ] || { echo "usage: bin/vh cover-preview <image> [more…] [--text-px N] [--out file.png|folder]"; exit 1; }
   on_ctrl_c uv run -q --no-project --with pillow --with numpy --with scipy python "$ROOT/tools/cover_preview.py" "$@"; }
 cmd_review() { python3 "$ROOT/tools/review.py" "$@"; }
+cmd_activity() { [ $# -gt 0 ] || { cmd_usage activity; exit 1; }; exec python3 "$ROOT/tools/activity.py" "$@"; }   # read-only, not logged
+cmd_status() { [ $# -gt 0 ] || { cmd_usage status; exit 1; }; exec python3 "$ROOT/tools/status.py" "$@"; }         # read-only, not logged
+cmd_gate() { [ $# -gt 0 ] || { cmd_usage gate; exit 1; }   # exec: stopping a backgrounded gate --wait stops its watcher;
+  export OVH_BASH=$BASH; exec python3 "$ROOT/tools/gate.py" "$@"; }   # the desk it starts runs under this same bash
 cmd_desk() { [ $# -gt 0 ] || { cmd_usage desk; exit 1; }   # stdlib only: no uv, works offline; exec, so stopping
   exec python3 "$ROOT/tools/desk/desk.py" "$@"; }            # a backgrounded bin/vh desk stops the server itself
 
@@ -785,9 +987,10 @@ cmd_sheet() {
   [ -s "$out" ] || { echo "$c_no no contact sheet written: the ffmpeg fallback produced no frame ($why)" >&2; return 1; }
   echo "$out (no timestamps: $why)"
 }
+ck_note() { [ -z "${J:-}" ] || { printf '%s\n' "$2" >> "$J/$1"; } 2>/dev/null || true; }   # ck_note <file> <line>: a line into check's scratch folder, if it has one
 cmd_check() {
-  local u="usage: bin/vh check <video> [--allow t,t…] [--against <reference.mp4>]"
-  local v=${1:?$u} allow="" against="" fail=0
+  local u="usage: bin/vh check <video> [--allow t,t…] [--against <reference.mp4>] [--json]"
+  local v=${1:?$u} allow="" against="" fail=0 json=""
   shift
   while [ $# -gt 0 ]; do case "$1" in
     --allow) [ $# -ge 2 ] || { echo "bin/vh check: --allow needs the seconds of designed flashes, comma-separated (e.g. 1.0,3.2 or 12-15)" >&2; return 1; }
@@ -796,48 +999,64 @@ cmd_check() {
     --against) [ $# -ge 2 ] || { echo "bin/vh check: --against needs the reference video (the approved 1080p cut)" >&2; return 1; }
       against=$2; shift 2 ;;
     --against=*) against=${1#--against=}; shift ;;
+    --json) json=1; shift ;;
     *) echo "bin/vh check: unknown option $1 ($u)" >&2; return 1 ;;
   esac; done
   [ -z "$against" ] || [ -f "$against" ] || { echo "bin/vh check: no reference video at $against" >&2; return 1; }
+  # each check also leaves its result in CHECK_TMP (gone on exit, vh_exit); tools/checkrec.py makes the record of them at
+  # the end, out/check/<name>.check.json. --json: that record on stdout, the lines a person reads on stderr. With no
+  # scratch folder (mktemp cannot make one) the checks run all the same, and no record is made
+  local J=""
+  CHECK_TMP=$(mktemp -d "${TMPDIR:-/tmp}/vh-check.XXXXXX" 2>/dev/null) || CHECK_TMP=""
+  if [ -n "$CHECK_TMP" ]; then J=$CHECK_TMP; vh_trap
+  else echo "$c_wa bin/vh check: no scratch folder in ${TMPDIR:-/tmp} (mktemp -d failed): the checks run, but no record is made" >&2; fi
+  if [ -n "$json" ]; then
+    exec 3>&1 1>&2
+    if ! ffprobe -v error -show_entries format=duration -of csv=p=0 "$v" >/dev/null 2>&1; then
+      act_str "$v"; printf '{"version": 1, "tool": "bin/vh check", "video": %s, "exit": 1, "verdict": "fail", "error": "ffprobe cannot read it"}\n' "$ACT_S" >&3
+    fi
+  fi
   ffprobe -v error -show_entries format=duration:stream=codec_type,codec_name,width,height,r_frame_rate -of compact "$v"
   # spec: the frame size, rate and length against the project's BRIEF (Output, Resolution); playbook/01-pipeline.md, 规格
   local spec src=0
   if [ -n "$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of csv=p=0 "$v" 2>/dev/null)" ]; then
-    spec=$(python3 "$ROOT/tools/speccheck.py" "$v") || src=$?
+    spec=$(python3 "$ROOT/tools/speccheck.py" "$v" ${J:+--json "$J/spec.json"}) || src=$?
     case "$src" in
       0) case "$spec" in *$'\nWARN '*) echo "$c_wa $spec" ;; *) echo "$c_ok $spec" ;; esac ;;
       1) fail=1; echo "$c_no $spec"; echo "   the render does not match the BRIEF: fix the render. Change the BRIEF's Output or Resolution line only when the spec itself changed" ;;
-      *) echo "$c_wa spec check failed (error above)" ;;
+      *) echo "$c_wa spec check failed (error above)"; ck_note skipped.txt $'spec\tthe spec check failed' ;;
     esac
   fi
   # gate ① on record: a standard or studio film is checked for release only once the person has decided its concept
   local gp gr grc=0; gp=$(project_of "$v")
   if [ -n "$gp" ]; then
-    gr=$(python3 "$ROOT/tools/gatecheck.py" "$gp" --for check 2>&1) || grc=$?
+    gr=$(python3 "$ROOT/tools/gatecheck.py" "$gp" --for check ${J:+--json "$J/gate.json"} 2>&1) || grc=$?
     case "$grc:$gr" in
       0:*"no gates"*|0:*"not checked"*) ;;
       0:*) echo "$c_ok $gr" ;;
       1:"gate record"*) fail=1; printf '%s\n' "$gr" | sed "1s/^/$c_no /" ;;
-      *) echo "$c_wa gate record check failed: $gr" ;;
+      *) echo "$c_wa gate record check failed: $gr"; ck_note skipped.txt $'gate\tthe gate record check failed' ;;
     esac
   fi
   local hits; hits=$(ffmpeg -i "$v" -vf "blackdetect=d=0.3,freezedetect=d=3" -af silencedetect=d=3 -f null - 2>&1 | grep -E "black_|freeze_|silence_" | sed 's/.*\] //' || true)
+  [ -z "$J" ] || printf '%s\n' "$hits" > "$J/detect.txt"
   if [ -z "$hits" ]; then echo "$c_ok no black/freeze/silence segments over threshold"
   else echo "$hits"; echo "$c_wa review each hit: dark backgrounds (e.g. 3b1b black), intentional holds and silent videos trigger these by design"; fi
   # isolated frames: one frame unlike both neighbours while they agree (another scene flashed in, garbled text): a capture
   # glitch too short for freezedetect, and a snapshot of that time is clean (playbook/02-verification.md, 静默失败)
   local iso rc=0 py=() ia=("$v" --motion)   # --motion: cuts that flash, still stretches, the film's motion (warnings, from the same decode)
+  [ -z "$J" ] || ia+=(--json "$J/iso.json")
   [ -z "$allow" ] || ia+=(--allow "$allow")
   [ -z "$gp" ] || ia+=(--confirmed "$gp/confirmed.json")   # designed flashes confirmed for good (tools/confirm.py)
   if command -v uv >/dev/null 2>&1; then py=(uv run -q --no-project --with numpy python)
   elif python3 -c "import numpy" 2>/dev/null; then py=(python3); fi
   if [ -z "$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of csv=p=0 "$v" 2>/dev/null)" ]; then :   # audio only
-  elif [ ${#py[@]} = 0 ]; then echo "$c_wa isolated-frame scan skipped: it needs numpy (install uv)"
+  elif [ ${#py[@]} = 0 ]; then echo "$c_wa isolated-frame scan skipped: it needs numpy (install uv)"; ck_note skipped.txt $'iso\tit needs numpy (install uv)'
   else
     iso=$(on_ctrl_c "${py[@]}" "$ROOT/tools/isoframes.py" "${ia[@]}") || rc=$?
     iso=$(printf '%s\n' "$iso" | sed -e "s/^  static:/$c_wa static:/" -e "s/^  cuts:/$c_wa cuts:/" -e "s/^  periodic:/$c_wa periodic:/" -e "s/^  note:/$c_wa note:/")
     case "$rc:$iso" in   # uv also exits 1 when it cannot install numpy, so the words decide, not the status alone
-      130:*) exit 130 ;;   # Ctrl-C: on_ctrl_c ended the scan's subshell
+      130:*) ctrl_c_exit ;;   # Ctrl-C: on_ctrl_c ended the scan's subshell
       0:*) echo "$c_ok $iso" ;;
       1:[0-9]*" isolated frame"*) echo "$c_no $iso"
         echo "   a flash you designed (a flash frame, a flicker) is listed too: confirm it in the project's confirmed.json (the confirm? line"
@@ -846,54 +1065,67 @@ cmd_check() {
         echo "   (ffmpeg -ss <s> -i <video> -frames:v 1 f.png)."
         echo "   A bad snapshot: the scene itself jumps there. A clean one: the render's capture glitched; for HyperFrames, re-render"
         echo "   with --no-browser-gpu --experimental-fast-capture=false and scan again (playbook/02-verification.md, 静默失败)" ;;
-      3:*) rc=1; echo "$c_no isolated-frame scan: bad --allow or confirmed.json (error above); nothing was declared or confirmed" ;;   # a typo must not switch the gate off
-      *) rc=2; echo "$c_wa isolated-frame scan failed (error above)" ;;
+      3:*) rc=1; echo "$c_no isolated-frame scan: bad --allow or confirmed.json (error above); nothing was declared or confirmed"   # a typo must not switch the gate off
+        ck_note errors.txt $'check.iso\tfail\tthe isolated-frame scan did not run: a bad --allow or confirmed.json, so nothing was declared or confirmed' ;;
+      *) rc=2; echo "$c_wa isolated-frame scan failed (error above)"; ck_note skipped.txt $'iso\tthe scan failed' ;;
     esac
   fi
   # subtitles: the film's subtitle tracks and the .srt beside it, each entry long enough to read (a warning)
   local sub src2=0
-  sub=$(python3 "$ROOT/tools/subcheck.py" "$v" 2>&1) || src2=$?
+  sub=$(python3 "$ROOT/tools/subcheck.py" "$v" ${J:+--json "$J/subs.json"} 2>&1) || src2=$?
   case "$src2:$sub" in
     0:*) [ -n "$sub" ] && case "$sub" in "subtitles: none"*) ;; *) printf '%s\n' "$sub" | sed "s/^subtitles/$c_ok subtitles/" ;; esac ;;
     1:subtitles*) printf '%s\n' "$sub" | sed -e "s/^subtitles\(.*\)shorter than/$c_wa subtitles\1shorter than/" -e "s/^subtitles · \(.*\)long enough/$c_ok subtitles · \1long enough/" ;;
-    *) echo "$c_wa subtitle check failed: $sub" ;;
+    *) echo "$c_wa subtitle check failed: $sub"; ck_note skipped.txt $'subtitles\tthe subtitle check failed' ;;
   esac
   # colour: browsers read untagged or BT.601-tagged HD video with the wrong matrix (playbook/02-verification.md, 色彩标签)
   local col; col=$(ffprobe -v error -select_streams v:0 -show_entries stream=pix_fmt,color_range,color_space,color_transfer,color_primaries -of csv=p=0 "$v" 2>/dev/null)
+  [ -z "$J" ] || printf '%s\n' "$col" > "$J/colour.txt"
   if [ -z "$col" ]; then :
   elif [ "$col" = "yuv420p,tv,bt709,bt709,bt709" ]; then echo "$c_ok colour: yuv420p, limited range, BT.709 with all four tags"
   else echo "$c_wa colour: $col (pix_fmt,range,matrix,transfer,primaries); deliver yuv420p, tv, bt709 ×3 — re-encode with the command in playbook/02-verification.md (色彩标签)"; fi
   # the publishing copy (PACKAGING.md, 发布文案) against the platforms' length limits: said, not a failure of the film
   local proj pk prc=0; proj=$(project_of "$v")
   if [ -n "$proj" ] && [ -f "$proj/PACKAGING.md" ]; then
-    pk=$(python3 "$ROOT/tools/packcheck.py" "$proj/PACKAGING.md" 2>&1) || prc=$?
+    pk=$(python3 "$ROOT/tools/packcheck.py" "$proj/PACKAGING.md" ${J:+--json "$J/pack.json"} 2>&1) || prc=$?
     case "$prc:$pk" in
       0:*"no 发布文案"*) ;;
       0:*) printf '%s\n' "$pk" | sed "s/^packaging/$c_ok packaging/" ;;
       1:*) echo "$c_wa the publishing copy in PACKAGING.md is over a platform's limit (playbook/10, 发布文案的长度):"; printf '%s\n' "$pk" | sed 's/^/   /' ;;
-      *) echo "$c_wa packaging check failed: $pk" ;;
+      *) echo "$c_wa packaging check failed: $pk"; ck_note skipped.txt $'packaging\tthe packaging check failed' ;;
     esac
   fi
   # scale: a 4K render against the approved 1080p cut, so a layout that only breaks at device scale 2 shows up
   # (engines/README.md, 出 4K). Needs numpy, like the frame scan.
   if [ -n "$against" ]; then
     local sc arc=0
-    if [ ${#py[@]} = 0 ]; then fail=1; echo "$c_no --against needs numpy (install uv)"
+    if [ ${#py[@]} = 0 ]; then fail=1; echo "$c_no --against needs numpy (install uv)"; ck_note errors.txt $'check.scale\tfail\t--against needs numpy (install uv)'
     else
-      sc=$(on_ctrl_c "${py[@]}" "$ROOT/tools/scalecheck.py" "$v" "$against" --sheet "$(dirname "$v")/check") || arc=$?
+      sc=$(on_ctrl_c "${py[@]}" "$ROOT/tools/scalecheck.py" "$v" "$against" --sheet "$(dirname "$v")/check" ${J:+--json "$J/scale.json"}) || arc=$?
       case "$arc:$sc" in
-        130:*) exit 130 ;;
+        130:*) ctrl_c_exit ;;
         0:*"WARN "*) echo "$c_wa $sc" ;;
         0:*) echo "$c_ok $sc" ;;
         1:*"the picture differs"*) fail=1; echo "$c_no $sc"
           echo "   the two renders differ for half a second or more: look at the comparison images above. A label or panel at twice the"
           echo "   size or shifted is code reading canvas or image pixel sizes at devicePixelRatio 2 (engines/README.md, 出 4K)" ;;
         1:*"FAIL "*) fail=1; echo "$c_no $sc" ;;
-        *) fail=1; echo "$c_no scale check failed (error above)" ;;
+        *) fail=1; echo "$c_no scale check failed (error above)"; ck_note errors.txt $'check.scale\tfail\tthe scale check failed' ;;
       esac
     fi
   fi
-  [ "$rc" != 1 ] && [ "$fail" = 0 ]   # exit 1 on isolated frames, a spec mismatch, no gate ① on record or a scale FAIL; the other findings are for review
+  local status=0
+  [ "$rc" != 1 ] && [ "$fail" = 0 ] || status=1   # exit 1 on isolated frames, a spec mismatch, no gate ① on record or a scale FAIL; the other findings are for review
+  # the record: out/check/<name>.check.json in the video's project (bin/vh status reads the last); with --json, on stdout too
+  local ra=("$v" --dir "$J" --exit "$status")
+  [ -z "$allow" ] || ra+=(--allow "$allow"); [ -z "$against" ] || ra+=(--against "$against")
+  if [ -z "$J" ]; then   # no scratch folder: no record (said above)
+    [ -z "$json" ] || printf '{"version": 1, "tool": "bin/vh check", "exit": %s, "verdict": "%s", "error": "no scratch folder (mktemp -d failed): no record was made"}\n' "$status" "$([ $status = 0 ] && echo pass || echo fail)" >&3
+  elif [ -n "$json" ]; then
+    python3 "$ROOT/tools/checkrec.py" "${ra[@]}" --print >&3 \
+      || printf '{"version": 1, "tool": "bin/vh check", "exit": %s, "verdict": "%s", "error": "the record could not be made"}\n' "$status" "$([ $status = 0 ] && echo pass || echo fail)" >&3
+  else python3 "$ROOT/tools/checkrec.py" "${ra[@]}" >/dev/null || true; fi
+  return $status
 }
 cmd_tts() {
   local proj=${1:?usage: bin/vh tts <project> [provider] [voice] [zh|en] [instruct] [--beats map.json --snap beat|half|downbeat] [--lead s] [--align gemini] [--join block|all] [--resume]} pos=() deps=""
@@ -988,6 +1220,11 @@ case "${2:-}" in -h|--help)   # `bin/vh <command> -h` prints its usage instead o
     frames|render|determinism|cues|patch) cmd_usage "$1"; echo; exec node "$ROOT/tools/film/$1.mjs" -h ;;   # + every flag
     *) cmd_usage "$1" && exit 0 ;; esac ;;
 esac
+case "${1:-}" in   # the activity log: every command that works on a project (act_start finds it) but the read-only views
+  ""|help|-h|--help|setup|install-skill|sync-agents|types|effort|recipes|doctor|status|activity|new) ;;   # (new: once the project is made)
+  desk) [ "${2:-}" = data ] || act_start "$@" || true ;;
+  *) act_start "$@" || true ;;
+esac
 
 case "${1:-help}" in
   doctor) shift; cmd_doctor "$@" ;; setup) cmd_setup ;; types) cmd_types ;;
@@ -996,8 +1233,11 @@ case "${1:-help}" in
   recipes) shift; python3 "$ROOT/tools/recipes.py" "$@" ;;
   review) shift; cmd_review "$@" ;;
   desk) shift; cmd_desk "$@" ;;
+  gate) shift; cmd_gate "$@" ;;
+  status) shift; cmd_status "$@" ;; activity) shift; cmd_activity "$@" ;;
   new) shift; cmd_new "$@" ;; style) shift; cmd_style "$@" ;; readcheck) shift; cmd_readcheck "$@" ;; textcheck) shift; cmd_textcheck "$@" ;; frames) shift; cmd_frames "$@" ;; render) shift; cmd_film_tool render "$@" ;; fonts) shift; cmd_fonts "$@" ;; determinism) shift; cmd_film_tool determinism "$@" ;; cues) shift; cmd_film_tool cues "$@" ;; patch) shift; cmd_film_tool patch "$@" ;;
   storyboard) shift; cmd_storyboard "$@" ;; rhythm) shift; cmd_rhythm "$@" ;; cover-preview) shift; cmd_cover_preview "$@" ;; effort) shift; cmd_effort "$@" ;; sync-agents) cmd_sync_agents ;; hf-init) shift; cmd_hf_init "$@" ;; sheet) shift; cmd_sheet "$@" ;; check) shift; cmd_check "$@" ;; gif) shift; cmd_gif "$@" ;; deliver) shift; cmd_deliver "$@" ;; clean) shift; cmd_clean "$@" ;;
   help|-h|--help) cmd_help ;;
   *) { echo "unknown command: $1"; echo; cmd_help; } >&2; exit 1 ;;
 esac
+ACT_DONE=1   # came to its end: the EXIT trap writes the run's end line (killed, it does not)
