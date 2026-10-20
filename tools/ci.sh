@@ -319,7 +319,7 @@ PY
   # measures each voice's pitch and speech rate and names the misread word; without a key, nothing is synthesized
   if ! command -v uv >/dev/null || ! command -v ffmpeg >/dev/null; then skip "tts --candidates · voices audition" "needs uv and ffmpeg"
   elif a=$(uv run -q --no-project --with numpy python - 2>&1 <<'PY'
-import base64, contextlib, importlib.util, io, json, os, re, sys, tempfile, threading, wave
+import base64, contextlib, hashlib, importlib.util, io, json, os, re, shutil, sys, tempfile, threading, wave
 import numpy as np
 os.environ["no_proxy"] = "127.0.0.1"; os.environ["GEMINI_API_KEY"] = "ci-stub"
 from pathlib import Path
@@ -396,6 +396,61 @@ with tempfile.TemporaryDirectory() as d:
     for want in ("warning: @b2 takes", "“讲一讲” twice"):
         if want not in out: bad.append(f"no '{want}' in: {out[-900:]}")
     if "warning: @a2" in out or "warning: @b1" in out: bad.append(f"a false warning: {out[-900:]}")
+    # --resume reuses a block's transcription only while it is of the same file: nothing changed, none; a cache from before
+    # the key (no sha256) beside other takes of its block, each block once (a copy that kept the date would pass for the
+    # old take), then none; another candidate copied over _block01.wav by hand, that block
+    vo, again = p / "audio/vo/zh", [str(p), "--provider", "gemini", "--voice", "Kore", "--join", "block", "--candidates", "3", "--resume"]
+    calls = lambda out: int((re.search(r"align: (\d+) transcribe call", out) or [0, -1])[1])   # noqa: E731
+    rc, out = run(again)
+    if rc != 0 or calls(out) != 0: bad.append(f"--resume with nothing changed: exit {rc}, {calls(out)} transcribe call(s): {out[-300:]}")
+    for f in vo.glob("_block0?.asr.json"):
+        c = json.loads(f.read_text(encoding="utf-8")); c.pop("sha256", None); f.write_text(json.dumps(c, ensure_ascii=False), encoding="utf-8")
+    rc, out = run(again); rc2, out2 = run(again); kept = (vo / "_block02.asr.json").stat().st_mtime_ns
+    if rc != 0 or calls(out) != 2 or calls(out2) != 0: bad.append(f"--resume on caches without a key beside other takes: exit {rc}, {calls(out)} then {calls(out2)} transcribe call(s): {out[-300:]}")
+    shutil.copyfile(vo / "_block01.c2.wav", vo / "_block01.wav")
+    rc, out = run(again); side = json.loads((vo / "_block01.asr.json").read_text(encoding="utf-8"))
+    if rc != 0 or calls(out) < 1 or side.get("sha256") != hashlib.sha256((vo / "_block01.wav").read_bytes()).hexdigest() \
+            or (vo / "_block02.asr.json").stat().st_mtime_ns != kept:
+        bad.append(f"--resume after _block01.wav was swapped by hand: exit {rc}, {calls(out)} call(s), cache key {side.get('sha256')}: {out[-300:]}")
+    # minimax gives its own word times (a stand-in for its API: a burst per character, 0.15 s, or 0.24 s every other take, and
+    # its subtitles): with --candidates, the other take copied over _block01.wav is cut by that take's own words file, and
+    # a take that is no candidate of the block stops the run (no --align gemini to cut it by), saying so
+    os.environ["MINIMAX_API_KEY"] = "ci-stub"; mm = {"n": 0}
+    def fake_mm(text, voice, lang, emotion):
+        b = 0.24 if mm["n"] % 2 else 0.15; mm["n"] += 1
+        x, subs, t = [np.zeros(int(0.05 * SR))], [], 0.05
+        for part in re.split(r"(<#[\d.]+#>)", text):
+            m = re.fullmatch(r"<#([\d.]+)#>", part)
+            if m:
+                x.append(np.zeros(int(float(m[1]) * SR))); t += float(m[1]); continue
+            for c in part.strip():
+                if not re.match(r"[一-鿿]", c):
+                    subs.append({"text": c, "time_begin": round(t * 1000), "time_end": round(t * 1000)}); continue
+                n = int(b * SR); x.append(0.3 * np.sin(2 * np.pi * 180 * np.arange(n) / SR) * np.sin(np.pi * np.arange(n) / n))
+                subs.append({"text": c, "time_begin": round(t * 1000), "time_end": round((t + b) * 1000)}); t += b
+                x.append(np.zeros(int(0.05 * SR))); t += 0.05
+        x.append(np.zeros(int(0.1 * SR))); y = np.concatenate(x); buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(SR); w.writeframes((np.clip(y, -1, 1) * 32767).astype("<i2").tobytes())
+        return buf.getvalue(), subs
+    tts.minimax_tts = fake_mm
+    q = Path(d) / "m"; (q / "audio").mkdir(parents=True); mvo = q / "audio/vo/zh"
+    (q / "audio/script.txt").write_text("@m1 我们今天讲声音。\n@m2 先从琴弦说起。\n\n@n1 空气把它传走。\n", encoding="utf-8")
+    mcmd = [str(q), "--provider", "minimax", "--voice", "x", "--join", "block", "--candidates", "2"]
+    spans = lambda: [round(s["end"] - s["start"], 2) for s in json.loads((q / "audio/timeline.zh.json").read_text(encoding="utf-8"))["segments"]][:2]   # noqa: E731
+    rc, out = run(mcmd)
+    if rc != 0: bad.append(f"minimax --candidates exited {rc}: {out[-500:]}")
+    else:
+        other = 3 - json.loads((mvo / "_pick.json").read_text(encoding="utf-8"))["blocks"]["1"]["chosen"]; before = spans()
+        shutil.copyfile(mvo / f"_block01.c{other}.wav", mvo / "_block01.wav")
+        rc, out = run(mcmd + ["--resume"]); after = spans()
+        own = tts.load_words(mvo / f"_block01.c{other}.words.json")[1]
+        if rc != 0 or tts.load_words(mvo / "_block01.words.json")[1] != own or not all(abs(q2 / p2 - (0.29 if other == 2 else 0.2) / (0.2 if other == 2 else 0.29)) < 0.1 for p2, q2 in zip(before, after)):
+            bad.append(f"minimax: the other take copied in by hand (exit {rc}): line spans {before} → {after}: {out[-300:]}")
+        shutil.copyfile(mvo / "_block02.wav", mvo / "_block01.wav")
+        rc, out = run(mcmd + ["--resume"])
+        if rc == 0 or "is not the take its word times (_block01.words.json) are of" not in out:
+            bad.append(f"minimax: a take that is no candidate of the block, copied in (exit {rc}): {out[-300:]}")
     (Path(d) / "t.txt").write_text("我们那儿的声音从一根琴弦说起。\n", encoding="utf-8")
     rc, out = run(["voices", "audition", "--provider", "gemini", "--voices", "Kore,Puck,Charon", "--text", f"{d}/t.txt", "--out", f"{d}/au", "--align", "gemini"])
     au = json.loads(Path(f"{d}/au/audition.json").read_text(encoding="utf-8")) if Path(f"{d}/au/audition.json").exists() else {"voices": []}
@@ -408,7 +463,7 @@ with tempfile.TemporaryDirectory() as d:
         if R["Kore"]["misread"] != [] or not any("那" in m for m in R["Charon"]["misread"]): bad.append(f"misread {[(v, R[v]['misread']) for v in R]}")
 print("\n".join(bad)); sys.exit(1 if bad else 0)
 PY
-); then ok "tts --candidates keeps the take nearest the median voice per block; a slow line and a repeated phrase are warned of; voices audition measures pitch, speech rate and misreads"
+); then ok "tts --candidates keeps the take nearest the median voice per block; a slow line and a repeated phrase are warned of; --resume hears a block swapped by hand again, the rest not; voices audition measures pitch, speech rate and misreads"
   else bad "tts --candidates / voices audition on the Gemini stub: $a"; fi
   t=$(mktemp -d "${TMPDIR:-/tmp}/vh-ci.XXXXXX"); printf '%s\n' '一句试音。' > "$t/t.txt"
   a=$(env -u GEMINI_API_KEY "$VH_BASH" "$ROOT/bin/vh" voices audition --provider gemini --voices Kore,Puck --text "$t/t.txt" 2>&1); rc=$?
@@ -450,6 +505,21 @@ PY
   case "$rc:$a" in 1:*"X / 推特: ✓ 简介 description 279 weighted"*"B站 + X: ✗ 简介 description 287 weighted"*"official, x)"*"小红书 xhs: · 简介 description 300 characters"*)
       ok "packcheck: X's limit in its weighted length (Chinese 2, a link 23), the tightest platform of a heading, a one-letter name standing alone" ;;
     *) bad "packcheck on X copy (rc $rc): $a" ;; esac
+  # what X takes for a link (twitter-text's rules): a bare domain with a TLD it knows, with its path, Chinese straight
+  # before it staying text; not after - _ . / @ $, not a file name with a TLD it does not know, not a host with no TLD
+  if a=$(python3 - <<'PY'
+import sys; sys.path.insert(0, "tools"); import packcheck as P
+cases = {"example.com/path": 23, "看这里：example.com，很好": 37, "x.com": 23, "packcheck.py": 23, "www.github.com/a/b": 23,
+         "b23.tv/BV1x": 23, "example.co.uk": 23, "bit.ly/abc?x=1": 23, "example.com?x=1": 27, "example.com:8080/x": 23,
+         "两个 https://a.io 和 b.io": 55, "https://example.com，后面": 29, "https://ex.com/a_(b).": 24, "ex.com/a.": 24,
+         "foo_bar.com": 11, "Node.js": 7, "tools/x.py": 10, "-x.com": 6, "a@example.com": 13, "$example.com": 12, "ex.comm": 7,
+         "https://localhost:3000/x": 24, "v1.2.3": 6, "a" * 63 + ".com": 23, "x" * 70 + ".com": 74, "看" * 70 + "example.com": 151,
+         "a." * 3000 + " example.com": 6024}   # a label over 63 characters (in punycode) is no link, as on X; a long dotted run
+bad = [f"{k!r}: {P.x_length(k)} (want {v})" for k, v in cases.items() if P.x_length(k) != v]
+print("; ".join(bad)); sys.exit(1 if bad else 0)
+PY
+  ); then ok "packcheck: X's links as twitter-text finds them, bare domains (example.com/path) included, not foo_bar.com, Node.js or tools/x.py"
+  else bad "packcheck, X's links: $a"; fi
   rm -rf "$t"
   if ! command -v ffmpeg >/dev/null; then skip "mux / gif smoke" "ffmpeg not installed"; return; fi
   if python3 tools/audio/test_mixstate.py; then ok "mix/mux: failed and stale builds refused, previous audio preserved, deliberate duration changes"
@@ -742,6 +812,20 @@ PY
       uv run -q --no-project --with numpy --with scipy python "$ROOT/tools/audio/music.py" "$t/qs/np.json" "$t/qs/np.wav" >/dev/null 2>&1
       a=$(python3 -c 'import json, sys; b = json.load(open(sys.argv[1])); print(b.get("unmapped"), len(b.get("notes", [])))' "$t/qs/np.beats.json" 2>&1)
       case "$a" in "['piano#0'] 1") ok "music: the note map says which parts it leaves out (unmapped; a texture plays no notes)" ;; *) bad "music: unmapped in the beat map: $a" ;; esac
+      # what qa and beats are given by mistake (a missing beat map, as --beats too, a missing mix, a list where the beat
+      # map goes, a file that is not audio, a missing track, no track): one line that names it and exit 2, no traceback; the
+      # event list where the beat map goes, beside --beats, gets the command with - in its place
+      printf '[1]' > "$t/qs/list.json"; printf '{}' > "$t/qs/x.wav"; printf '[]' > "$t/qs/ev.json"; printf '{}' > "$t/qs/b.json"; a=""
+      for c in "qa.py|nope.json (the beat map)|$t/qs/mix.wav|--beats|$t/qs/nope.json" "qa.py|nope.json (the beat map)|$t/qs/mix.wav|$t/qs/nope.json" \
+               "qa.py|nope.wav (the mix)|$t/qs/nope.wav" "qa.py|list.json is not a beat map|$t/qs/mix.wav|$t/qs/list.json" \
+               "qa.py|x.wav: no audio ffmpeg can read|$t/qs/x.wav" "beats.py|beats: no such file: $t/qs/nope.wav|$t/qs/nope.wav" "beats.py|beats: which track?|--no-drums" \
+               "qa.py|write - in its place: qa $t/qs/mix.wav - $t/qs/ev.json --beats $t/qs/b.json|$t/qs/mix.wav|$t/qs/ev.json|--beats|$t/qs/b.json"; do
+        IFS='|' read -r -a cargs <<< "$c"
+        b=$(uv run -q --no-project --with numpy --with scipy python "$ROOT/tools/audio/${cargs[0]}" "${cargs[@]:2}" 2>&1); rc=$?
+        case "$rc:$b" in *Traceback*) a="$a | ${cargs[0]}: $b" ;; "2:"*"${cargs[1]}"*) [ "$(printf '%s\n' "$b" | wc -l | tr -d ' ')" = 1 ] || a="$a | ${cargs[0]}, more than a line: $b" ;;
+          *) a="$a | ${cargs[0]} ${cargs[*]:2} (rc $rc): $b" ;; esac
+      done
+      [ -z "$a" ] && ok "qa and beats: a missing or wrong input (beat map, --beats, mix, track) is one line and exit 2, not a traceback" || bad "qa / beats on a wrong input:$a"
     fi
     a=$(vh check "$t/a.wav" 2>&1); rc=$?
     case "$rc:$a" in 0:*"isolated"*) bad "check on audio only mentions the frame scan: $a" ;; 0:*) ok "check on an audio file skips the frame scan quietly" ;; *) bad "check on audio only (rc $rc): $a" ;; esac
@@ -855,6 +939,14 @@ decision_checks() {
     case "$a" in *"retry later: bin/vh hf-init"*" 4:5"*) ok "new --aspect 4:5 writes the BRIEF's frame lines, and a failed scaffold's retry hint keeps 4:5" ;; *) bad "new --aspect 4:5 retry hint: $a" ;; esac
   else bad "new --aspect 4:5 BRIEF: $a"; fi
   a=$(vh new handdrawn ci-x --res 4k 2>&1); rc=$?; [ $rc = 1 ] && case "$a" in *"no 4K output"*) true ;; *) false ;; esac && ok "new --res 4k is refused for the hand-drawn engine" || bad "new handdrawn --res 4k exited $rc: $a"
+  # the hand-drawn engine's window.film gives its frame rate (PROJECT.fps, else render.mjs's 24), as canvas-film's does
+  a=$(node -e 'const vm = require("vm"), fs = require("fs"), out = [];
+for (const extra of ["", "PROJECT.fps = 30;"]) {
+  const g = vm.createContext({ console, setTimeout }); g.window = g.self = g; g.location = { search: "" };
+  vm.runInContext(fs.readFileSync("engines/ClaudeAnimationBase/src/config.js", "utf8").replace("const PROJECT", "var PROJECT") + extra, g);
+  vm.runInContext(fs.readFileSync("engines/ClaudeAnimationBase/src/core.js", "utf8"), g); out.push(vm.runInContext("window.film.fps", g)); }
+console.log(out.join(" "))' 2>&1)
+  [ "$a" = "24 30" ] && ok "ClaudeAnimationBase: window.film.fps is PROJECT.fps, 24 without it" || bad "ClaudeAnimationBase window.film.fps (want 24 30): $a"
   a=$(vh new short ci-x --watch tv 2>&1); rc=$?; [ $rc = 1 ] && case "$a" in *"unknown --watch"*) true ;; *) false ;; esac && ok "new --watch rejects an unknown target" || bad "new --watch tv exited $rc: $a"
   a=$(vh new short ci-x --watch feed 2>&1); rc=$?; [ $rc = 1 ] && case "$a" in *"already --watch phone"*) true ;; *) false ;; esac && ok "new refuses a feed target for a vertical frame" || bad "new short --watch feed exited $rc: $a"
   a=$(vh new promo ci-x --watch phone 2>&1); rc=$?; [ $rc = 1 ] && case "$a" in *"--watch feed"*) true ;; *) false ;; esac && ok "new refuses a phone target for a landscape frame" || bad "new promo --watch phone exited $rc: $a"
@@ -992,6 +1084,16 @@ SH
   if vh music "$t/stop.json" "$t/stop.wav" --roll --length 8 >/dev/null && [ -s "$t/stop.roll/overview.png" ] && [ -s "$t/stop.roll/03-celesta-0.png" ] \
     && python3 -c "import json, sys; b = json.load(open(sys.argv[1])); f = b['fade']; sys.exit(0 if f['end'] == 8.0 and any(abs(f['start'] - x) < 1e-6 for x in b['beats']) and [h['t'] for h in b['hits'] if h['what'] == 'stop:a'] == [3.6] else 1)" "$t/stop.beats.json"
   then ok "music --roll and --length with a section stop, a cresc and a pickup"; else bad "music with a stop: $(head -c 300 "$t/stop.beats.json" 2>/dev/null)"; fi
+  # a score written for another engine (showcase 04's own score_engine.py: bars as [first, last]) or a list: one line, exit 2
+  printf '[]' > "$t/list.json"; a=""
+  for f in showcase/04-intro-film/audio/score.json showcase/04-intro-film/audio/score.base.json "$t/list.json"; do
+    b=$(vh music "$f" "$t/foreign.wav" 2>&1); rc=$?
+    case "$rc:$b" in *Traceback*|*Error*) a="$a | $f: $b" ;; "2:music: $f: not a score bin/vh music reads"*'"sections": [{"name"'*)
+        case "$f:$b" in *score*.json:*'"engine" is audio/score_engine.py'*|*list.json:*"(a JSON list)"*) ;; *) a="$a | $f does not say why: $b" ;; esac ;;
+      *) a="$a | $f (rc $rc): $b" ;; esac
+  done
+  [ -z "$a" ] && [ ! -e "$t/foreign.wav" ] && ok "music: another engine's score (bars as [first, last]) or a list says it is not one it reads, and what it reads" \
+    || bad "music on a foreign score:$a"
   # the part voices that used to stop on a non-zero sample (taiko, saw_pluck, edm_clap, edm_hat) end on zero, every voice does
   if a=$(uv run -q --no-project --with numpy --with scipy python - 2>&1 <<'PY'
 import sys
@@ -1363,6 +1465,36 @@ PY
     [ "$a" = False ] && ok "desk: a copied project starts its own server, and a .listening from another folder doesn't count" || bad "desk on a copy: listening said '$a'"
     kill "$desk_pid"; wait "$desk_pid" 2>/dev/null
   fi
+  # a .listening of this folder and a live pid whose until is not a number of seconds is not listening, and raises nothing
+  a=$(python3 - "$t/p2" <<'PY' 2>&1
+import json, os, sys, time
+sys.path.insert(0, "tools/desk"); import feedback
+p = sys.argv[1]; flag = os.path.join(p, "out/review/feedback/.listening")
+def said(until):
+    with open(flag, "w") as f: json.dump({"pid": os.getpid(), "since": 0, "until": until, "project": os.path.realpath(p)}, f)
+    return feedback.listening(p)["listening"]
+print(" ".join(str(said(u)) for u in ("soon", [1], "nan", time.time() + 60)))
+PY
+  )
+  [ "$a" = "False False False True" ] && ok "desk: a .listening whose until is not seconds (a word, a list, NaN) is not listening, and is no error" || bad "desk listening on a bad until: $a"
+  # desk wait has its signal handlers before it writes .listening: a TERM right after the write (sent from inside the
+  # write, so no timing is involved) ends it with 143 and takes the flag away, as one later does
+  rm -f "$t/p2/out/review/feedback/.listening"
+  a=$(python3 - "$t/p2" <<'PY' 2>&1
+import os, subprocess, sys
+child = """import os, signal, sys
+sys.path.insert(0, "tools/desk"); import feedback
+w = feedback._write
+def write(p, text):
+    w(p, text)
+    if p.name == ".listening": os.kill(os.getpid(), signal.SIGTERM)
+feedback._write = write
+sys.exit(feedback.wait(sys.argv[1], 30, poll=0.05))"""
+rc = subprocess.run([sys.executable, "-c", child, sys.argv[1]], capture_output=True).returncode   # -15: killed by it
+print(rc, "flag left" if os.path.exists(os.path.join(sys.argv[1], "out/review/feedback/.listening")) else "no flag")
+PY
+  )
+  [ "$a" = "143 no flag" ] && ok "desk wait: a TERM the moment .listening is written ends it with 143 and no flag left" || bad "desk wait TERMed right after its flag: $a"
   a=$(vh desk "$t/p" --port 0 2>&1); case "$a" in *"already serving p"*) ok "desk: a second start points to the running server" ;; *) bad "desk second start: $a" ;; esac
   kill "$pid"; wait "$pid" 2>/dev/null
   [ ! -e "$t/p/out/review/.desk.json" ] && ok "desk: stopping the server removes out/review/.desk.json" || bad "desk left .desk.json behind"
@@ -1620,6 +1752,29 @@ PY
   for i in $(seq 16); do vh timeline "$p" "${la[@]}" >/dev/null 2>&1 & done; wait
   c=$(python3 -c 'import json, sys; ls = open(sys.argv[1], "rb").read().splitlines(); r = [json.loads(l) for l in ls]; print(len(ls), max(map(len, ls)) < 1024, r[0]["args"][-1])' "$p/.ovh/activity.jsonl" 2>&1)
   [ "$a" = 32 ] && [ "$c" = "32 True …" ] && ok "activity: 16 commands at once leave 32 whole lines, also with long arguments (cut to stay under 1 KiB)" || bad "activity: 16 concurrent commands left: $a / $c"
+  # arguments that are not UTF-8 (a Latin-1 name, a surrogate's bytes, a cut character), and a tool's output path that is
+  # not either, are written as \xNN: every line is UTF-8 JSON, a Chinese argument stays as it is; a line an older bin/vh
+  # wrote with the raw byte still reads, with the byte as \xNN
+  rm -f "$p/.ovh/activity.jsonl"
+  vh timeline "$p" $'caf\xe9.wav' "片子" $'\xed\xa0\x80' $'a\xe7\x89' >/dev/null 2>&1
+  OVH_ACTIVITY_LOG="$p/.ovh/activity.jsonl" OVH_ACTIVITY_RUN=ci-1 OVH_ACTIVITY_CMD=qa python3 -c 'import os, sys; sys.path.insert(0, "tools"); import activity
+activity.note("made", [os.fsdecode(os.fsencode(sys.argv[1]) + b"/out/x\xff.wav")])' "$p"
+  printf '{"v":1,"event":"note","run":"old-1","t":1,"cmd":"qa","summary":"raw \351 byte"}\n' >> "$p/.ovh/activity.jsonl"
+  a=$(python3 - "$p/.ovh/activity.jsonl" <<'PY' 2>&1
+import json, sys
+ls = open(sys.argv[1], "rb").read().splitlines(); bad = []
+for n, l in enumerate(ls[:-1], 1):   # the last: the older bin/vh's own line
+    try: json.loads(l.decode("utf-8"))
+    except ValueError as e: bad.append(f"line {n} is not UTF-8 JSON: {e}")
+r = [json.loads(l.decode("utf-8")) for l in ls[:3]] if not bad else []
+if r and (r[0]["args"][1:] != ["caf\\xe9.wav", "片子", "\\xed\\xa0\\x80", "a\\xe7\\x89"] or r[2]["outputs"] != ["out/x\\xff.wav"]): bad.append(f"written as {r[0]['args'][1:]} {r[2]['outputs']}")
+print("; ".join(bad))
+PY
+  )
+  b=$(vh activity "$p" 2>&1); rb=$?
+  case "$a|$rb:$b" in "|0:"*'caf\xe9.wav 片子 \xed\xa0\x80 a\xe7\x89'*'out/x\xff.wav'*'raw \xe9 byte'*)
+      ok "activity: arguments and paths that are not UTF-8 are written as \\xNN (every line UTF-8 JSON); an older raw line still reads" ;;
+    *) bad "activity with bytes that are not UTF-8: $a | exit $rb: $(printf '%s' "$b" | tail -c 400)" ;; esac
   # signals: a tool bin/vh exec'd into writes its own end, 128 + the signal (desk wait, the desk itself); a command bash
   # waits on (a stand-in uv that never ends): TERM ends bin/vh at once, with no end line (the run reads as gone), and a
   # Ctrl-C (SIGINT to the process group) writes the end with 130 and then ends bin/vh by SIGINT (the caller sees -2)
@@ -1641,7 +1796,7 @@ def stub():
     return subprocess.run(["pgrep", "-f", f"{t}/stub/uv"], capture_output=True).returncode == 0
 out = []
 pr = start("desk", "wait", p, "--timeout", "30", until=f"{p}/out/review/feedback/.listening")
-time.sleep(0.3); pr.send_signal(signal.SIGTERM); out.append(f"wait {pr.wait(10)}")   # (its handlers come just after the flag)
+pr.send_signal(signal.SIGTERM); out.append(f"wait {pr.wait(10)}")   # at once: its handlers are in place before the flag
 pr = start("desk", p, "--port", "0", until=f"{p}/out/review/.desk.json")
 time.sleep(0.5); pr.send_signal(signal.SIGTERM); out.append(f"desk {pr.wait(10)}")
 pr = start("qa", f"{p}/audio/mix.wav", until=mark)
@@ -1772,6 +1927,30 @@ film_checks() {
   case "$rc:$a" in 1:*"while loading: failed to load missing.png"*) ok "frames: a request that fails while loading fails the run" ;; *) bad "frames on a failed load: exit $rc: $(printf '%s' "$a" | tail -c 600)" ;; esac
   a=$(vh frames tools/film/fixture/nofilm.html --at 1 --out "$t/d" 2>&1); rc=$?
   case "$rc:$a" in 2:*"no window.film"*) ok "frames: a page without window.film exits 2" ;; *) bad "frames on a page without the contract: exit $rc: $(printf '%s' "$a" | tail -c 600)" ;; esac
+  # a frame that never comes back (from 1 s on its promise never settles) stops the run at --frame-timeout, naming its t,
+  # with the frames before it written: not at the whole run's --timeout (600 s)
+  mkdir -p "$t/hang" && sed 's|if (t >= 2) throw new Error("no picture after 2 s");|if (t >= 1) return new Promise(() => {});|' tools/film/fixture/throws.html > "$t/hang/index.html"
+  s0=$SECONDS; a=$(vh frames "$t/hang" --at 0.5,1.5 --frame-timeout 5 --out "$t/hang/o" 2>&1); rc=$?
+  case "$rc:$a" in 2:*"t=1.5 s: no picture after 5 s (--frame-timeout)"*) [ -s "$t/hang/o/index-t0000.500.png" ] && [ $((SECONDS - s0)) -lt 120 ] \
+      && ok "frames: a frame that never returns stops the run at --frame-timeout (exit 2), naming its t, the frames before it kept" \
+      || bad "frames on a frame that never returns: $((SECONDS - s0)) s, $(ls "$t/hang/o" 2>&1)" ;;
+    *) bad "frames on a frame that never returns: exit $rc: $(printf '%s' "$a" | tail -c 600)" ;; esac
+  # a raised --timeout raises a frame's cap with it (a page whose frames are that slow), unless --frame-timeout says otherwise
+  a=$(vh frames tools/film/fixture --at 0.5 --timeout 300 --out "$t/ft" 2>&1); b=$(vh frames tools/film/fixture --at 0.5 --timeout 300 --frame-timeout 7 --out "$t/ft" 2>&1)
+  case "$a|$b" in *"a frame may take 300 s (--timeout)"*"|"*"a frame may take 7 s (--frame-timeout)"*) ok "frames: --timeout alone is a frame's cap too; --frame-timeout wins" ;;
+    *) bad "frames: a frame's cap from --timeout: $(printf '%s' "$a" | head -1) | $(printf '%s' "$b" | head -1)" ;; esac
+  # a browser stuck on its way out (it answers, then ignores Browser.close and SIGTERM: a stand-in on the DevTools pipe)
+  # is killed: close() returns within seconds, so no tool waits on it until its watchdog
+  printf '%s\n' 'import json, os, signal, time' 'signal.signal(signal.SIGTERM, signal.SIG_IGN); buf = b""' \
+    'while b"Browser.getVersion" not in buf: buf += os.read(3, 65536)' \
+    'm = json.loads(buf.split(b"\0")[0]); os.write(4, json.dumps({"id": m["id"], "result": {"product": "Stub/1"}}).encode() + b"\0")' \
+    'while True: time.sleep(1)' > "$t/stuck.py"
+  printf '#!/bin/sh\nexec python3 "%s"\n' "$t/stuck.py" > "$t/stuck"; chmod +x "$t/stuck"
+  a=$(node --input-type=module -e 'import { launch } from "./tools/textcheck/browser.mjs";
+const b = await launch(process.argv[1]); const t0 = Date.now();
+const r = await Promise.race([b.close().then(() => "closed"), new Promise((ok) => setTimeout(() => ok("hung"), 30000))]);
+console.log(r, Math.round((Date.now() - t0) / 1000)); process.exit(0);' "$t/stuck" 2>&1)
+  case "$a" in "closed "[0-9]|"closed 1"[0-9]) ok "browser: one that ignores Browser.close and SIGTERM is killed, and close() returns ($a s)" ;; *) bad "browser close on a stuck browser: $a" ;; esac
   a=$(vh frames tools/film/fixture --at 5 --out "$t/e" 2>&1); rc=$?
   case "$rc:$a" in 2:*"outside the film"*) ok "frames: a time outside the film exits 2" ;; *) bad "frames outside the film: exit $rc: $(printf '%s' "$a" | tail -c 600)" ;; esac
   if command -v ffmpeg >/dev/null; then
@@ -1809,16 +1988,25 @@ PY
     # the queue and the resume, on a page whose frames cost unevenly (tools/film/fixture/uneven.html: from 2 s on 30 ms
     # each, frame 75 5 s): chunks of one GOP, so 3 workers make the video 1 makes (PSNR: separate browsers). A render
     # whose frame 75 passes --frame-timeout 3 keeps the 5 chunks it finished; with the page edited they are not used;
-    # the same command then draws only the last chunk, and the video is the one a whole render makes
-    mkdir -p "$t/q" && cp tools/film/fixture/uneven.html "$t/q/u.html"
+    # the same command then draws only the last chunk, and the video is the one a whole render makes. The disk floor of a
+    # resume is what it writes: the chunk left and the joined copy, the kept chunks' bytes in it (a disk 1000 bytes over
+    # those refuses it, the chunks kept); its glyph check (the page writes a word) says the kept chunks' frames were not checked
+    mkdir -p "$t/q" && sed 's|x.fillStyle = "#fc0";|x.font = "16px sans-serif"; x.fillStyle = "#fff"; x.fillText("chunk", 8, 24); x.fillStyle = "#fc0";|' tools/film/fixture/uneven.html > "$t/q/u.html"
     vh render "$t/q/u.html" --workers 1 --gop 15 --out "$t/q/one.mp4" >/dev/null 2>&1
     a=$(vh render "$t/q/u.html" --workers 3 --gop 15 --out "$t/q/three.mp4" 2>&1); rc=$?
     b=$(vh render "$t/q/u.html" --workers 2 --gop 15 --frame-timeout 3 --out "$t/q/r.mp4" 2>&1); rc2=$?
+    kb=$(python3 -c 'import os, sys; d = sys.argv[1]; print(sum(os.path.getsize(os.path.join(d, f)) for f in os.listdir(d) if f.startswith("part")))' "$t/q/.r.mp4.parts" 2>/dev/null || echo 0)
+    e=$(OVH_FREE_BYTES=$((kb + 1000)) vh render "$t/q/u.html" --workers 2 --gop 15 --frame-timeout 3 --out "$t/q/r.mp4" 2>&1); rc5=$?
+    case "$rc5:$e" in 2:*"needed at the peak for the 15 frames left to draw and the joined copy (5 chunks kept"*)
+        kn=0; for kf in "$t/q/.r.mp4.parts"/part*.mp4; do [ ! -e "$kf" ] || kn=$((kn + 1)); done; [ $kn = 5 ] && ok "render: a resume's disk floor is the chunk left and the joined copy with the kept chunks' bytes; refused, it keeps them" \
+          || bad "render: a resume refused for the disk did not keep its chunks: $(ls "$t/q/.r.mp4.parts" 2>&1)" ;;
+      *) bad "render resume on a disk with room for the kept chunks only (exit $rc5, $kb bytes kept): $(printf '%s' "$e" | tail -c 500)" ;; esac
     printf '<!-- edited -->\n' >> "$t/q/u.html"
     c=$(vh render "$t/q/u.html" --workers 2 --gop 15 --frame-timeout 3 --out "$t/q/r.mp4" 2>&1); rc3=$?
     d=$(vh render "$t/q/u.html" --workers 2 --gop 15 --out "$t/q/r.mp4" 2>&1); rc4=$?
     if [ "$rc:$rc2:$rc3:$rc4" = 0:1:1:0 ] && printf '%s' "$b" | grep -q '5 of 6 chunks are kept' && printf '%s' "$c" | grep -q 'not used (changed: .*u\.html)' \
-      && printf '%s' "$d" | grep -q 'resuming: 5 of 6 chunks kept' && [ ! -e "$t/q/.r.mp4.parts" ] && python3 - "$t/q" <<'PY'
+      && printf '%s' "$d" | grep -q 'resuming: 5 of 6 chunks kept' && printf '%s' "$d" | grep -q 'glyphs: checked in the 15 frames drawn now; the 75 frames of the 5 kept' \
+      && [ ! -e "$t/q/.r.mp4.parts" ] && python3 - "$t/q" <<'PY'
 import json, re, subprocess, sys
 d = sys.argv[1]
 def psnr(a, b):
@@ -1831,6 +2019,11 @@ sys.exit(0 if ok and psnr(d + "/one.mp4", d + "/three.mp4") >= 45 and psnr(d + "
 PY
     then ok "render: one-GOP chunks taken in turn (3 workers make what 1 makes); a timed-out frame keeps the finished chunks, an edited page starts over, the same command resumes"
     else bad "render queue and resume: exit $rc:$rc2:$rc3:$rc4: $(printf '%s' "$b$c$d" | tail -c 900)"; fi
+    # bin/vh patch passes --frame-timeout to the render of its frames: frames 74-76 of the film above take the GOP from 60,
+    # and frame 75 (5 s) is past 2 s
+    a=$(vh patch "$t/q/one.mp4" --frames 74-76 --frame-timeout 2 --out "$t/q/p.mp4" 2>&1); rc=$?
+    case "$rc:$a" in 1:*"no picture after 2 s (--frame-timeout)"*"rendering frames"*"failed"*) ok "patch: --frame-timeout goes to the render of its frames" ;;
+      *) bad "patch --frame-timeout (exit $rc): $(printf '%s' "$a" | tail -c 500)" ;; esac
     # the estimate, the page's own fps and a relative --out, from another folder: the canvas-film template (made for 30 fps)
     # at --fps 60 is over 600 frames, so it is estimated; the disk has room for a flat film (7.2 MB at the peak) but not
     # for what was measured (about 12 MB)
@@ -2049,14 +2242,17 @@ FILM.minText = 80;
 COVERS.length = 0;
 COVERS.push({ id: "L", at: "@a2:第二张+0.6", title: { text: ["二十个字的标题二十个字的标题二十个字的"], size: 80, x: 960, y: 1000, align: "center" }, ratios: { "3:4": {} } });
 JS
-  a=$(vh frames "$t/cmt" --covers --ratios 9:16,3:4 --out "$t/cmt/o" 2>&1); rc=$?
+  # (a browser that stops painting is a stall of the machine, not of the page: frames says so at --frame-timeout and the run
+  # is tried once more, said in the line; each run is reported on its own)
+  a=$(vh frames "$t/cmt" --covers --ratios 9:16,3:4 --frame-timeout 60 --out "$t/cmt/o" 2>&1); rc=$?; again=""
+  case "$rc:$a" in 2:*"(--frame-timeout)"*|2:*"the page does not answer"*) again=" (tried again: $(printf '%s\n' "$a" | tail -1))"; a=$(vh frames "$t/cmt" --covers --ratios 9:16,3:4 --frame-timeout 60 --out "$t/cmt/o" 2>&1); rc=$? ;; esac
   [ $rc = 1 ] && printf '%s' "$a" | grep -q 'fonts this machine does not have' && ! printf '%s\n' "$a" | grep -q '^  cover L' && rc=0
   mkdir "$t/cmt2" && cp -R "$t/cmt/." "$t/cmt2/" && echo 'COVERS[0].title.text = ["Supercalifragilisticexpialidocious-and-more"]; COVERS[0].title.size = 60;' >> "$t/cmt2/src/50-shots.js"
   b=$(vh frames "$t/cmt2" --at 1 --out "$t/cmt2/o" 2>&1); rc2=$?
   if [ $rc = 0 ] && [ "$(printf '%s\n' "$a" | grep -c 're-set for it on 2 lines')" = 2 ] && [ $rc2 = 2 ] \
     && printf '%s' "$b" | grep -q 'cover L (3:4): the cover.s title does not fit 1080 x 1440 at 80 px or more (FILM.minText).*give it ratios\["3:4"\].title'
-  then ok "covers --ratios: the default title is laid out at the size drawn (FILM.minText), broken onto more lines when too wide; one that cannot fit stops ready"
-  else bad "covers --ratios default title under the text floor (exit $rc / $rc2): $(printf '%s' "$a$b" | tail -c 700)"; fi
+  then ok "covers --ratios: the default title is laid out at the size drawn (FILM.minText), broken onto more lines when too wide; one that cannot fit stops ready$again"
+  else bad "covers --ratios default title under the text floor: the covers (exit $rc$again): $(printf '%s' "$a" | tail -c 500) | the title that cannot fit (exit $rc2): $(printf '%s' "$b" | tail -c 400)"; fi
   # a page whose size is only in window.film (1080x1920, its HTML says nothing): the drawing ratio comes from that size, so
   # its 4:3 crop (1080x810) is drawn at 1.333x and not scaled up from 1x
   mkdir "$t/ctall" && cat > "$t/ctall/film.html" <<'HTML'
@@ -2387,11 +2583,23 @@ PY
   if command -v uv >/dev/null; then   # an empty event list: no length to take from it
     printf '[]\n' > "$t/none.json"
     a=$(vh sfx place "$t/none.json" "$t/none.wav" 2>&1); rc=$?; b=$(vh sfx place "$t/none.json" "$t/none.wav" 2 2>&1)
-    case "$rc:$a:$b" in 1:*"has no events"*"<duration_s>"*:*"0 events"*"2.00s"*) ok "sfx place: an empty event list asks for a duration, and with one writes a silent track" ;;
+    case "$rc:$a:$b" in 2:*"has no events"*"<duration_s>"*:*"0 events"*"2.00s"*) ok "sfx place: an empty event list asks for a duration, and with one writes a silent track" ;;
       *) bad "sfx place on an empty event list (exit $rc): $a / $b" ;; esac
     a=$(vh sfx place "$t/none.json" "$t/none.wav" 2s 2>&1); rc=$?
     case "$rc:$a" in 2:*"duration '2s' is not a number of seconds"*) case "$a" in *Traceback*) bad "sfx place with a duration 2s: a traceback: $a" ;; *) ok "sfx place: a duration that is not a number is said plainly (exit 2)" ;; esac ;;
       *) bad "sfx place with a duration 2s (exit $rc): $a" ;; esac
+    # usage errors exit 2 (no command, a typo, place without its files, a missing event list, lib without a folder, an
+    # audition value out of range), an event list that cannot become a track exits 1 (an unknown sound, a field out of range)
+    printf '[{"t": 0.5, "sfx": "nosuch"}]' > "$t/unk.json"; printf '[{"t": 0.5, "sfx": "whoosh", "dur": 99}]' > "$t/far.json"; a=""
+    b=$(vh sfx audition -h 2>/dev/null); rc=$?   # help is not an error: stdout, exit 0, as sfx -h; a bare audition is a one-line one
+    case "$rc:$b" in 0:*"audition <name|all>"*) ;; *) a=" | sfx audition -h (exit $rc): $(printf '%s' "$b" | head -c 200)" ;; esac
+    for c in "2|" "2|plcae" "2|place" "2|place|$t/unk.json" "2|place|$t/nope.json|$t/o.wav" "2|lib" "2|audition" "2|audition|whoosh|dur=99|--out|$t/au.wav" \
+             "1|place|$t/unk.json|$t/o.wav" "1|place|$t/far.json|$t/o.wav"; do
+      IFS='|' read -r -a cargs <<< "$c"
+      b=$(vh sfx "${cargs[@]:1}" 2>&1); rc=$?
+      case "$rc:$b" in *Traceback*) a="$a | sfx ${cargs[*]:1}: $b" ;; "${cargs[0]}:sfx"*) ;; *) a="$a | sfx ${cargs[*]:1} (exit $rc, want ${cargs[0]}): $(printf '%s' "$b" | tail -c 200)" ;; esac
+    done
+    [ -z "$a" ] && ok "sfx: help exits 0, usage errors exit 2, an event list that cannot become a track exits 1, each in a line and none a traceback" || bad "sfx exit codes:$a"
   fi
   rm -rf "$t"
 }
