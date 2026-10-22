@@ -18,7 +18,7 @@
 | 粒子、汇聚、流线场 | canvas 或 Three.js 自己写，用 `hash(i)` 定初始状态 | `hash` + `jit` | `VMobject` 点阵 | 思路参考 guizang 的 `assets/fx-lab/`（AGPL，只看思路不复用代码） |
 | 文字动效 | 逐词 stagger、`steps()` 打字、`clip-path` 揭示（数值见 03 篇） | `letter()`、`sfx()` | `Write`、`TransformMatchingTex` | — |
 | 数据图表动画 | `npx hyperframes add data-chart`；`hyperframes-creative/references/data-in-motion.md` | — | `Axes`、`BarChart` | `references/repos/data-animation-skills/` |
-| 角色动画 | — | Clawd 的 31 种情绪、转身、舞蹈（ANIMATION_GUIDE） | — | 生成视频打底 + 转描（`05-hybrid-genvideo.md`） |
+| 角色动画 | — | Clawd 的 31 种情绪、转身、舞蹈（ANIMATION_GUIDE） | — | 代码动画 + 程序化转描或三渲二（`05-code-scene-pipeline.md`） |
 | 3D、着色器 | Three.js 层 + postprocessing | — | `ThreeDScene` | `references/repos/awesome-opus5-5-videos/` 的 3d 类作品和 prompt |
 | 光标、UI 演示 | `oversized-cursor` 技法（`_upstream_claude/skills/oversized-cursor/`） | — | — | 用真实 UI，不用占位 |
 
@@ -105,7 +105,7 @@ npx hyperframes render --variables '{"fx":"A"}' --output out/lookdev/A.mp4
 - **停站不是停机**：v2 在三道关卡上让音乐和摄像机同时停住，用户的反馈是音乐"卡顿或者消失"，看上去就像播放器卡了。v3 的做法：
   - 镜头减速成慢推，再叠一层低幅手持漂移。漂移用带种子的低频平滑噪声（约 0.5–2 Hz）；逐帧取随机数即使带种子，也只是抖动，不是手持；
   - "停"交给光、声和盖章来表达：鼓先撤，pad 和 sub 持续垫底，一道 riser 吸进下一个强拍，配乐里不出现数字静音（见 `04-audio.md`）。
-- **复杂运镜写成动作编排**：一段路径只有一个主运镜。次运镜挂在触发点上，例如能量头到达某个节点、一句字读完。再写明哪些量保持不变（字号、主体大小、轴线）。短段落最多两个主动作。给视频模型写运镜也是这套办法，见 `05-hybrid-genvideo.md`。
+- **复杂运镜写成动作编排**：一段路径只有一个主运镜。次运镜挂在触发点上，例如能量头到达某个节点、一句字读完。再写明哪些量保持不变（字号、主体大小、轴线）。短段落最多两个主动作。代码场景的相机运动也按此编排，见 `05-code-scene-pipeline.md`。
 - **真实素材放在世界里**：成片挂在空间里的屏幕上，联系表立成一面墙；每一帧都能追溯到真实来源。关卡也一样：门里放被审的那份东西（这支片子自己的大纲、分镜联系表、初版联系表），镜头穿门而过；关卡的字幕在通过那一拍从 ○ 变成 ✓，是同一句话，不是新的一读（v5）。
 - **氛围层先画，永远让字**：v5 正文里飘着上千张小影片，是透明物体；一开始它们按默认顺序画，离镜头近的卡片压在字和面板上面，“102 instruments”被盖成“02”。氛围层设最小的 `renderOrder`（例如 −100）最先画，字、面板、成片都盖在它上面；离镜头太近的卡片在几米内淡掉，不让一张大卡一两帧闪过镜头。
 - **要读的字不要亮到触发后期**：光条、泛光按亮度阈值取高光，要读的琥珀字如果超过阈值，会被自己的横向光条吃掉，看上去是柠檬黄压在橙色上。要读的彩色字把线性亮度压在阈值以下（v5 的光条阈值是最亮通道 0.82，琥珀字从 #FFB224 改成 #DCA234），光效留给不用读的东西。

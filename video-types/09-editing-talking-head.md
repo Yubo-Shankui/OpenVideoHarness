@@ -8,7 +8,7 @@
 - 单人口播为主，轻对谈次之。
 
 **不适用**：
-- 没有真人素材、要生成人物：走 `playbook/05-hybrid-genvideo.md`；
+- 没有真人素材、要制作人物：走 `playbook/05-code-scene-pipeline.md`，优先 Blender / Three.js；
 - 用历史影像剪纪录片：05 的"边界"一节；
 - 多机位、影视调色、复杂音频修复：导出 FCPXML 或 OTIO 交给剪辑软件（`engines/editing.md` 的"导出"）；
 - 素材里有他人出镜却没有授权，或用户不能说明来源。

@@ -85,7 +85,7 @@ This is a music video, not a lyric slideshow.
 
 - `cases/mv-pdoom.md`：p5.brush 路线的完整案例，源码在 `references/repos/PDoomVideo/`（`STORYBOARD.md`、`ANIMATION_GUIDE.md`、`src/ch/c01_lab.js` 到 `c09_finale.js`）。**没有 license，只能阅读参考。**
 - `cases/mv-functional-emotions.md`：歌词对齐流水线，外加主 agent 先做样板、7 个 subagent 并行；源码在 `references/repos/functional-emotions-video/`（MIT），渲染器是 `js/paint.js`。
-- `cases/mv-claude-pop.md`：生成式视频加 JS 转描的混合路线。
+- `cases/mv-claude-pop.md`：上游生成视频加 JS 转描的历史案例；本 fork 改用 `playbook/05-code-scene-pipeline.md` 的 D 模式，不调用生成模型。
 - `references/repos/hyperframes/skills/music-to-video/`：B 路线的完整流程，`references/` 下有 `planning.md`、`storyboard-format.md`、`montage.md`、`motion-primitive-catalog.md`、`template-catalog.md`。
 - `references/repos/hyperframes/skills/hyperframes-creative/references/beat-direction.md` 和 `audio-reactive.md`。
 

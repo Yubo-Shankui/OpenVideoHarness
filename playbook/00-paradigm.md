@@ -22,14 +22,14 @@
 | **p5.js + p5.brush**（ClaudeAnimationBase） | JS，每帧 `renderAt(t)` | 手绘、水彩、墨线质感；有现成角色和完整动画规范；仓库自带 | 纯 2D；没有 GPU 时水彩渲染慢（Apple Silicon 实测约 0.13 秒/帧） | 角色短片、手绘 MV、叙事型科普 |
 | **自定义 WebGL/Canvas** | JS | 可做任意画风，例如 functional-emotions 的 6 万笔触渲染器 | 要从头搭 | 有明确风格追求的 MV |
 | **Blender**（MCP 或 `blender -b` 脚本） | Python bpy | 真 3D、光照、物理 | 渲染慢；MCP 会直接执行 LLM 生成的代码 | 3D 产品展示、空间场景 |
-| **生成式视频 + 代码叠加** | 调 API，再写叠加层 | 写实人物和物理效果 | 花钱多；跨镜头角色一致性差；结果不确定 | 见 `05-hybrid-genvideo.md` |
+| **纯代码场景 + 代码叠加** | 建模、动画、渲染与合成 | 人物、物理过程与实拍式构图；人物优先 Blender / Three.js | 复杂形态和运动需显式实现，不保证照片级真实 | 见 `05-code-scene-pipeline.md` |
 
 【综合】默认选法：
 - 要精确的数学图形，用 Manim；
 - 要手绘质感，用 ClaudeAnimationBase；
 - 其余先用 HyperFrames；
 - 需要真 3D，用 Blender；
-- 需要真人或写实效果，走混合管线。
+- 需要真人或写实效果，走纯代码场景管线，写实人物优先 Blender / Three.js。
 
 ## 为什么大家最后都走到同一套流程
 
